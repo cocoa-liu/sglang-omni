@@ -166,6 +166,10 @@ Qwen3-Omni 验证需要 NPU 0--8，因此不能重启容器、终止该进程或
 在资源释放前，只执行不占用 NPU 的导入、语法和单元测试。完整服务启动和固定
 用例结果将在资源空闲后补充。
 
+推送前再次检查时，外部任务已经扩展到物理 NPU 0--4，其中多个进程占用约
+53 GB HBM。此时继续启动 Qwen3-Omni 会造成资源冲突，因此本次没有伪造或沿用
+旧服务的端到端结果。
+
 ### 6.4 精确提交导入与单测
 
 从代码提交生成 Git archive，传到目标机并解压到独立目录。两端 archive 的
@@ -209,3 +213,15 @@ archive sha256: 128e78175097359ba84cfc4087ca611ca820352858bb124fc401c58ab88c66e8
   稀疏模型的合理预期。
 - 显式 seed 的 NPU Talker 采样暂不支持，默认请求通过原生无 seed 采样规避
   BiSheng 编译错误。
+
+## 8. fork 推送结果
+
+分支已推送到：
+
+```text
+git@github.com:cocoa00/sglang-omni.git
+refs/heads/feat/qwen3-omni-ascend-a3
+```
+
+推送后通过 `git ls-remote` 核对远端引用与本地 HEAD 一致。本地分支已设置为
+跟踪 `fork/feat/qwen3-omni-ascend-a3`。
