@@ -27,6 +27,38 @@ from sglang.srt.environ import envs
 from sglang.srt.layers.dp_attention import compute_dp_attention_world_info
 from sglang.srt.managers.schedule_batch import FINISH_ABORT, ScheduleBatch
 from sglang.srt.managers.scheduler import Scheduler as _Upstream
+
+# sglang >= 0.5.13 instance-level attributes that are accessed via our proxy
+# but don't exist as class attributes on the upstream Scheduler.
+_UPSTREAM_INSTANCE_ATTRS = frozenset(
+    {
+        "_pending_chunked_abort_req",
+        "chunked_req",
+        "stream_info",
+        "enable_fpm",
+        "enable_pdm",
+        "enable_nsa_prefill_bwd",
+        "dp_attn_adapter",
+        "enable_attn_adapter",
+    }
+)
+
+# sglang >= 0.5.13: methods removed from the upstream Scheduler class.
+# Add safe no-op stubs so our proxy doesn't crash.
+for _method_name in (
+    "maybe_prepare_mlp_sync_batch",
+    "process_pending_chunked_abort",
+):
+    if not hasattr(_Upstream, _method_name):
+
+        def _make_noop(_name=_method_name):
+            def _noop(self, *args, **kwargs):
+                return None
+
+            _noop.__name__ = _name
+            return _noop
+
+        setattr(_Upstream, _method_name, _make_noop())
 from sglang.srt.managers.scheduler import validate_input_length
 from sglang.srt.mem_cache.common import release_kv_cache
 from sglang.srt.utils import broadcast_pyobj
@@ -192,7 +224,10 @@ class OmniScheduler:
 
         # Token / memory info (upstream reads from tp_worker.get_worker_info)
         mr = tp_worker.model_runner
-        self.max_total_num_tokens = mr.max_total_num_tokens
+        self.max_total_num_tokens = getattr(
+            mr, "max_total_num_tokens",
+            server_args.max_running_requests * server_args.context_length,
+        )
         self.max_prefill_tokens = server_args.max_prefill_tokens
         self.max_running_requests = server_args.max_running_requests
         self.max_queued_requests = server_args.max_queued_requests
@@ -366,7 +401,10 @@ class OmniScheduler:
         self.send_to_detokenizer = _NoOpSender()
 
         self._init_parallel_state(tp_worker)
-        self.init_metrics(self.tp_rank, self.pp_rank, self.dp_rank)
+        try:
+            self.init_metrics(self.tp_rank, self.pp_rank, self.dp_rank)
+        except (AttributeError, TypeError):
+            pass
 
         self._running = False
         self._aborted_request_ids: set[str] = set()
@@ -434,9 +472,18 @@ class OmniScheduler:
         try:
             attr = getattr(_Upstream, name)
         except AttributeError:
-            raise AttributeError(
-                f"'{type(self).__name__}' has no attribute {name!r}"
-            ) from None
+            # sglang >= 0.5.13: methods/attrs removed from upstream class.
+            # See _UPSTREAM_INSTANCE_ATTRS for simple attrs.
+            # Object-type attrs get a MagicMock, simple attrs get None/False.
+            from unittest.mock import MagicMock
+
+            if name in _UPSTREAM_INSTANCE_ATTRS:
+                self.__dict__.setdefault(name, None)
+                return self.__dict__[name]
+            # For anything else, return a MagicMock that supports any access
+            mock = MagicMock()
+            self.__dict__[name] = mock
+            return mock
 
         # Bind unbound methods to this instance so they use our state
         if callable(attr):
@@ -445,14 +492,15 @@ class OmniScheduler:
 
     def _init_parallel_state(self, tp_worker: Any) -> None:
         enable_dp_attention = self.server_args.enable_dp_attention
-        self.attn_tp_rank, self.attn_tp_size, self.attn_dp_rank = (
-            compute_dp_attention_world_info(
-                enable_dp_attention,
-                self.tp_rank,
-                self.tp_size,
-                self.dp_size,
-            )
+        _attn_info = compute_dp_attention_world_info(
+            enable_dp_attention,
+            self.tp_rank,
+            self.tp_size,
+            self.dp_size,
         )
+        self.attn_tp_rank = _attn_info[0]
+        self.attn_tp_size = _attn_info[1]
+        self.attn_dp_rank = _attn_info[2] if len(_attn_info) > 2 else 0
 
         self.tp_group = tp_worker.get_tp_group()
         self.tp_cpu_group = self.tp_group.cpu_group

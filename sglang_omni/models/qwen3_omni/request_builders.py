@@ -35,10 +35,6 @@ TALKER_STAGE = "talker_ar"
 CODE2WAV_STAGE = "code2wav"
 MM_AGGREGATE_STAGE = "mm_aggregate"
 
-# Note(Chenchen Hong): PyTorch sampling_seed must fit a positive int32.
-MAX_INT32_POSITIVE = 0x7FFFFFFF
-
-
 def _resolve_seed(params: dict[str, Any]) -> int | None:
     """Resolve random seed from request params (accepts both ``seed`` and ``sampling_seed``)."""
     for key in ("seed", "sampling_seed"):
@@ -1063,11 +1059,6 @@ def _build_talker_request_data(
 ) -> SGLangARRequestData:
     params = payload.request.params
     sampling_cfg = resolve_sampling_config(params)
-    if sampling_cfg.get("seed") is None:
-        sampling_cfg["seed"] = (
-            xxhash.xxh64_intdigest(str(payload.request_id).encode("utf-8"))
-            & MAX_INT32_POSITIVE
-        )
     thinker_chunks = list(payload.prefetched_chunks)
     thinker_done = bool(payload.prefetched_stream_done)
 

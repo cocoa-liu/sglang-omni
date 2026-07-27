@@ -116,11 +116,15 @@ class Stage:
             relay_type = config.get("relay_type", "nixl").lower()
             gpu_id = config.get("gpu_id")
             if gpu_id is not None:
-                device = f"cuda:{gpu_id}"
+                from sglang_omni.utils.device import get_device_string
+
+                device = get_device_string(gpu_id)
             else:
                 device = "cpu"
                 if relay_type == "nccl":
-                    device = "cuda"
+                    from sglang_omni.utils.device import get_device_name
+
+                    device = get_device_name()
             self.relay = create_relay(
                 relay_type,
                 engine_id=engine_id,
@@ -167,7 +171,9 @@ class Stage:
                     if self.gpu_id is not None:
                         import torch
 
-                        torch.cuda.set_device(int(self.gpu_id))
+                        from sglang_omni.utils.device import set_device
+
+                        set_device(int(self.gpu_id))
                         logger.info(
                             "Scheduler thread for stage %s set CUDA device to %s",
                             self.name,

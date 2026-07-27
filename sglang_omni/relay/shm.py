@@ -102,8 +102,10 @@ class ShmGetOperation(ShmOperation):
                 copy_len = min(dest_view.numel(), size)
                 dest_view[:copy_len].copy_(src_tensor[:copy_len])
 
-                if self._dest_tensor.is_cuda:
-                    torch.cuda.synchronize(self._dest_tensor.device)
+                if self._dest_tensor.is_cuda or getattr(self._dest_tensor, "is_npu", False):
+                    from sglang_omni.utils.device import synchronize as _sync
+
+                    _sync(self._dest_tensor.device)
 
             finally:
                 # 3. Cleanup (Receiver owns lifecycle)

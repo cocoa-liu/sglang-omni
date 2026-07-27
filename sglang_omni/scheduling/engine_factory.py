@@ -23,7 +23,7 @@ class TtsEngineBuilder(ABC):
         self,
         model_path: str,
         *,
-        device: str = "cuda:0",
+        device: str | None = None,
         gpu_id: int | None = None,
         dtype: str = "bfloat16",
         server_args_overrides: dict[str, Any] | None = None,
@@ -31,9 +31,16 @@ class TtsEngineBuilder(ABC):
         from sglang_omni.scheduling import bootstrap as scheduling_bootstrap
         from sglang_omni.scheduling import sglang_backend
 
+        if device is None:
+            from sglang_omni.utils.device import get_device_string
+
+            device = get_device_string(gpu_id or 0)
+
         checkpoint_dir = self.resolve_checkpoint(model_path)
         if gpu_id is not None:
-            device = f"cuda:{gpu_id}"
+            from sglang_omni.utils.device import get_device_string
+
+            device = get_device_string(gpu_id)
         gpu_id = int(device.split(":")[-1]) if ":" in device else 0
         self.checkpoint_dir = checkpoint_dir
         self.device = device

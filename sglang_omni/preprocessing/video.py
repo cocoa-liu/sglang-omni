@@ -17,7 +17,37 @@ from qwen_vl_utils import vision_process as qwen_vision
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as tv_f
 
+from sglang_omni.utils.device import get_device_type
+
 from .base import MediaIO, _is_url
+
+# torchcodec requires CUDA runtime (libnvrtc.so) — remove from backends on NPU
+if get_device_type() == "npu":
+    qwen_vision.VIDEO_READER_BACKENDS.pop("torchcodec", None)
+
+# qwen-vl-utils version compat: back-fill attributes removed/renamed in newer versions.
+# Newer versions store token counts; older versions stored pre-computed pixel counts
+# (token * IMAGE_PATCH_SIZE * SPATIAL_MERGE_SIZE)^2.
+_patch = getattr(qwen_vision, "IMAGE_PATCH_SIZE", 14)
+_merge = getattr(qwen_vision, "SPATIAL_MERGE_SIZE", 2)
+_img_factor = _patch * _merge  # typically 14 * 2 = 28
+_pix_factor = _img_factor * _img_factor  # typically 784
+
+if not hasattr(qwen_vision, "VIDEO_MIN_PIXELS"):
+    _vt = getattr(qwen_vision, "VIDEO_MIN_TOKEN_NUM", 128)
+    qwen_vision.VIDEO_MIN_PIXELS = _vt * _pix_factor
+if not hasattr(qwen_vision, "VIDEO_MAX_PIXELS"):
+    _vt = getattr(qwen_vision, "VIDEO_MAX_TOKEN_NUM", 768)
+    qwen_vision.VIDEO_MAX_PIXELS = _vt * _pix_factor
+if not hasattr(qwen_vision, "VIDEO_TOTAL_PIXELS"):
+    _vt = getattr(qwen_vision, "VIDEO_TOTAL_TOKEN_NUM", 20480)
+    qwen_vision.VIDEO_TOTAL_PIXELS = _vt * _pix_factor
+if not hasattr(qwen_vision, "IMAGE_FACTOR"):
+    qwen_vision.IMAGE_FACTOR = _img_factor
+if not hasattr(qwen_vision, "MAX_PIXELS"):
+    qwen_vision.MAX_PIXELS = qwen_vision.VIDEO_MAX_PIXELS
+if not hasattr(qwen_vision, "MIN_PIXELS"):
+    qwen_vision.MIN_PIXELS = qwen_vision.VIDEO_MIN_PIXELS
 from .cache_key import compute_media_cache_key
 from .resource_connector import global_thread_pool
 
@@ -323,7 +353,8 @@ def load_video_path(
         ele["total_pixels"] = int(total_pixels)
     backend = qwen_vision.get_video_reader_backend()
     try:
-        video, sample_fps = qwen_vision.VIDEO_READER_BACKENDS[backend](ele)
+        backend_result = qwen_vision.VIDEO_READER_BACKENDS[backend](ele)
+        video, sample_fps = backend_result[0], backend_result[-1]
     except Exception as backend_exc:
         if backend == "torchvision":
             raise VideoDecodeError(
@@ -332,7 +363,8 @@ def load_video_path(
             ) from backend_exc
         logger.warning("Video reader %s failed, falling back to torchvision", backend)
         try:
-            video, sample_fps = qwen_vision.VIDEO_READER_BACKENDS["torchvision"](ele)
+            fallback_result = qwen_vision.VIDEO_READER_BACKENDS["torchvision"](ele)
+            video, sample_fps = fallback_result[0], fallback_result[-1]
         except Exception as fallback_exc:
             raise VideoDecodeError(
                 f"Failed to decode video path={path}; {backend} failed with "

@@ -49,15 +49,48 @@ def _load_bin_shard(path: str) -> dict[str, torch.Tensor]:
     return torch.load(path, map_location="cpu")
 
 
-def _read_safetensors_keys(path: Path, keys: list[str]) -> dict[str, torch.Tensor]:
+def _read_safetensors_keys(path: Path, keys: list[str], device: str = "cpu") -> dict[str, torch.Tensor]:
     from safetensors import safe_open
 
     state_dict: dict[str, torch.Tensor] = {}
     if not keys:
         return state_dict
-    with safe_open(str(path), framework="pt", device="cpu") as f:
+    with safe_open(str(path), framework="pt", device=device) as f:
         for key in keys:
             state_dict[key] = f.get_tensor(key)
+    return state_dict
+
+
+def _load_weights_with_device(
+    model_path: str, prefix: str | tuple[str, ...] | list[str], *, device: str
+) -> dict[str, torch.Tensor]:
+    """Load weights directly to the given device (e.g. 'npu:0') via safetensors."""
+    from safetensors import safe_open
+
+    resolved = resolve_model_path(model_path, local_files_only=False)
+    prefix_str = _normalize_prefixes(prefix)[0]
+    index_file = resolved / "model.safetensors.index.json"
+
+    if not index_file.exists():
+        return {}
+
+    with index_file.open("r", encoding="utf-8") as f:
+        weight_map = json.load(f)["weight_map"]
+
+    shards: dict[str, list[str]] = {}
+    for key, shard in weight_map.items():
+        if key.startswith(prefix_str):
+            shards.setdefault(shard, []).append(key)
+
+    state_dict: dict[str, torch.Tensor] = {}
+    for shard, keys in shards.items():
+        shard_path = resolved / shard
+        if not keys:
+            continue
+        with safe_open(str(shard_path), framework="pt", device=device) as sf:
+            for key in keys:
+                new_key = key[len(prefix_str):]
+                state_dict[new_key] = sf.get_tensor(key)
     return state_dict
 
 
@@ -223,24 +256,42 @@ def load_module(
     local_files_only: bool = False,
 ) -> nn.Module:
     """Load weights into module by prefix, optionally move to device."""
-    state_dict = load_weights_by_prefix(
-        model_path,
-        prefix=prefix,
-        local_files_only=local_files_only,
-    )
+    device_str = str(device) if device is not None else None
+    from sglang_omni.utils.device import get_device_type as _gdt
+
+    # NPU: use safe_open(device=) to load weights directly to NPU memory,
+    # bypassing module.to() which crashes on cpu-only torch + torch_npu.
+    if _gdt() == "npu" and device_str is not None and device_str != "cpu":
+        state_dict = _load_weights_with_device(
+            model_path,
+            prefix=prefix,
+            device=device_str,
+        )
+    else:
+        state_dict = load_weights_by_prefix(
+            model_path,
+            prefix=prefix,
+            local_files_only=local_files_only,
+        )
     # Prefer assign=True to avoid expensive in-place tensor copies during load.
     try:
         module.load_state_dict(state_dict, strict=strict, assign=True)
     except (TypeError, RuntimeError):
         module.load_state_dict(state_dict, strict=strict)
+    # NPU path: load_state_dict may not move buffers. Move parameters
+    # and buffers to target device via per-tensor assignment (bypasses
+    # the broken module.to() on cpu-only torch + torch_npu).
+    if _gdt() == "npu" and device_str is not None and device_str != "cpu":
+        for _p in module.parameters():
+            _p.data = _p.data.to(device_str)
+        for _b in module.buffers():
+            _b.data = _b.data.to(device_str)
     module.eval()
-    if device is not None or dtype is not None:
-        if device is not None and dtype is not None:
-            module = module.to(device=device, dtype=dtype)
-        elif device is not None:
-            module = module.to(device=device)
-        else:
-            module = module.to(dtype=dtype)
+    if dtype is not None:
+        for _p in module.parameters():
+            _p.data = _p.data.to(dtype)
+    elif device is not None and device_str is not None and not device_str.startswith("npu"):
+        module = module.to(device=device)
     return module
 
 

@@ -45,17 +45,26 @@ class Connection:
             os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
             os.environ.setdefault("MASTER_PORT", "29500")
 
-            if torch.cuda.is_available():
-                self.device_id = rank % torch.cuda.device_count()
-                torch.cuda.set_device(self.device_id)
+            from sglang_omni.utils.device import (
+                get_device_name,
+                get_device_string,
+                get_distributed_backend,
+                set_device,
+            )
+
+            if torch.cuda.is_available() or getattr(torch, "npu", None) is not None:
+                dev_type = get_device_name()
+                dev_count_fn = torch.cuda.device_count if dev_type == "cuda" else torch.npu.device_count
+                self.device_id = rank % dev_count_fn()
+                set_device(self.device_id)
             else:
                 self.device_id = 0
 
             dist.init_process_group(
-                "nccl",
+                get_distributed_backend(),
                 rank=rank,
                 world_size=world_size,
-                device_id=torch.device(f"cuda:{self.device_id}"),
+                device_id=torch.device(get_device_string(self.device_id)),
             )
         else:
             self.device_id = (
@@ -174,18 +183,20 @@ class NcclRelay(Relay):
         rank: int = None,
         world_size: int = 2,
     ):
+        from sglang_omni.utils.device import set_device
+
         self.engine_id = engine_id
         self.device = device
 
         self.device_id = 0
-        if "cuda" in device and ":" in device:
+        if ":" in device:
             try:
                 self.device_id = int(device.split(":")[1])
             except ValueError:
                 self.device_id = 0
 
-        if torch.cuda.is_available():
-            torch.cuda.set_device(self.device_id)
+        if torch.cuda.is_available() or getattr(torch, "npu", None) is not None:
+            set_device(self.device_id)
 
         if rank is None:
             rank = int(os.environ.get("RANK", 0))
@@ -210,7 +221,9 @@ class NcclRelay(Relay):
             f"[{engine_id}] Initialized NCCL Relay on {device} (Rank {rank}). Starting Warmup..."
         )
 
-        dummy_tensor = torch.tensor([1.0], device=f"cuda:{self.device_id}")
+        from sglang_omni.utils.device import get_device_string as _gds
+
+        dummy_tensor = torch.tensor([1.0], device=_gds(self.device_id))
         warmup_reqs = []
 
         try:

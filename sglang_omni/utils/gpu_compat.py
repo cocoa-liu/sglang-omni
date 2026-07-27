@@ -8,6 +8,8 @@ import logging
 import os
 from collections.abc import Mapping, MutableMapping, Sequence
 
+from sglang_omni.utils.device import get_device_type
+
 from sglang_omni.utils.gpu_memory import (
     _get_device_handle,
     _shutdown_nvml,
@@ -25,6 +27,10 @@ def _get_compute_capability(
     logical_gpu_id: int,
     env: Mapping[str, str] | None = None,
 ) -> tuple[int, int] | None:
+    """Return CUDA compute capability or None. NPU always returns None (no SM concept)."""
+    if get_device_type() == "npu":
+        return None
+
     source_env = os.environ if env is None else env
     visible_devices = parse_cuda_visible_devices(source_env.get("CUDA_VISIBLE_DEVICES"))
     try:
@@ -69,6 +75,14 @@ def _get_compute_capability(
 
 
 def _get_cuda_device_count() -> int | None:
+    """Return device count. NPU uses torch.npu.device_count()."""
+    if get_device_type() == "npu":
+        try:
+            torch = importlib.import_module("torch")
+            return int(torch.npu.device_count())
+        except Exception:
+            return None
+
     pynvml = _try_import_pynvml()
     if pynvml is not None:
         try:
@@ -115,7 +129,13 @@ def get_visible_gpu_sm_version(
 def visible_gpus_need_flashinfer_cuda_norm(
     env: Mapping[str, str] | None = None,
 ) -> bool:
-    """Return whether any visible CUDA device needs the FlashInfer CUDA norm workaround."""
+    """Return whether any visible CUDA device needs the FlashInfer CUDA norm workaround.
+
+    Always returns False on NPU (FlashInfer is CUDA-only).
+    """
+    if get_device_type() == "npu":
+        return False
+
     source_env = os.environ if env is None else env
     for gpu_id in _visible_gpu_ids(source_env):
         sm_version = get_visible_gpu_sm_version(gpu_id, source_env)
@@ -154,15 +174,11 @@ def gpu_ids_support_p2p_mesh(
 ) -> bool | None:
     """Return whether the given logical GPUs form a full peer-to-peer mesh.
 
-    Custom (P2P/NVLink) all-reduce only works when every tensor-parallel rank can
-    directly access every other rank's memory. This queries NVML's pairwise P2P
-    status (so it does not create a CUDA context in the caller) for all ordered
-    pairs of the given logical GPU ids (resolved through ``CUDA_VISIBLE_DEVICES``).
-
-    Returns ``True`` only when every pair reports P2P-capable, ``False`` when any
-    pair is not, and ``None`` when the topology cannot be determined (pynvml
-    missing, NVML query error, or fewer than two distinct GPUs).
+    On NPU, always returns None (no NVML P2P API available; use HCCL instead).
     """
+    if get_device_type() == "npu":
+        return None
+
     ids = list(dict.fromkeys(int(g) for g in logical_gpu_ids))
     if len(ids) < 2:
         return None
@@ -213,12 +229,12 @@ def should_disable_custom_all_reduce_for_gpus(
 ) -> bool:
     """Whether to disable SGLang custom all-reduce for a TP thinker.
 
-    Custom all-reduce requires a direct P2P mesh between the tensor-parallel GPUs;
-    on topologies without it (or that can't be confirmed) it must fall back to
-    NCCL. This returns ``True`` (disable) unless NVML confirms a full P2P mesh,
-    so the safe default is preserved and custom all-reduce is only enabled on
-    capable topologies (e.g. NVLink).
+    On NPU, always returns True (disable) — custom all-reduce is CUDA-only;
+    HCCL should be used instead.
     """
+    if get_device_type() == "npu":
+        return True
+
     if not logical_gpu_ids:
         return True
     return gpu_ids_support_p2p_mesh(logical_gpu_ids, env) is not True

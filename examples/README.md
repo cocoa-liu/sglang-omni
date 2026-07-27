@@ -1,60 +1,13 @@
-# Examples
+# sglang-omni-ascend-a3 — Examples
 
-Run these commands from the repository root after installing `sglang-omni`.
+Usage examples for external developers and AI Code Agents. Generated after System Testing by the `long-task-finalize` skill.
 
-## Qwen3-Omni Server
+## Prerequisites
 
-Text output:
+*(Prerequisites will be listed when examples are generated.)*
 
-```bash
-python examples/run_qwen3_omni_server.py \
-  --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct \
-  --port 8000 \
-  --model-name qwen3-omni
-```
+## Examples
 
-Text and audio output:
-
-```bash
-python examples/run_qwen3_omni_speech_server.py \
-  --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct \
-  --gpu-thinker 0 \
-  --gpu-talker 1 \
-  --gpu-code2wav 1 \
-  --port 8000 \
-  --model-name qwen3-omni
-```
-
-Qwen3-Omni FP8, one-GPU colocated H100/H20:
-
-```bash
-sgl-omni serve \
-  --config examples/configs/qwen3_omni_fp8_colocated.yaml \
-  --colocate \
-  --model-name qwen3-omni \
-  --port 8000
-```
-
-## Ming-Omni Server
-
-Text output:
-
-```bash
-python examples/run_ming_omni_server.py \
-  --model-path inclusionAI/Ming-flash-omni-2.0 \
-  --port 8000 \
-  --model-name ming-omni
-```
-
-Text and audio output:
-
-```bash
-python examples/run_ming_omni_speech_server.py \
-  --model-path inclusionAI/Ming-flash-omni-2.0 \
-  --gpu-thinker 0 \
-  --gpu-talker 1 \
-  --port 8000 \
-  --model-name ming-omni
-```
-
-Use a different `--port` if you run more than one server at the same time.
+| # | Scenario | File | How to run |
+|---|----------|------|------------|
+| — | *(examples will be generated after System Testing)* | — | — |

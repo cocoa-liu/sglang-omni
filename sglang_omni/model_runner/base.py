@@ -81,7 +81,9 @@ class ModelRunner:
     def __init__(self, tp_worker: Any, output_processor: Any):
         self.tp_worker = tp_worker
         self.output_processor = output_processor
-        self.device = torch.device(f"cuda:{tp_worker.gpu_id}")
+        from sglang_omni.utils.device import get_device_string
+
+        self.device = torch.device(get_device_string(tp_worker.gpu_id))
         self.model = tp_worker.model_runner.model
 
         # Async decode (one-step lookahead). Inert unless ``_async_enabled`` is set.
@@ -258,8 +260,10 @@ class ModelRunner:
             ForwardBatch,
         )
 
-        if self.device.type == "cuda":
-            torch.cuda.set_device(self.device)
+        if self.device.type in ("cuda", "npu"):
+            from sglang_omni.utils.device import set_device
+
+            set_device(self.device)
 
         schedule_batch = scheduler_output.batch_data
         if schedule_batch is None:

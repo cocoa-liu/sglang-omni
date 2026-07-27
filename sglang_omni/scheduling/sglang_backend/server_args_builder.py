@@ -34,6 +34,10 @@ def build_sglang_server_args(
     kwargs.update(overrides)
     if kwargs.get("mem_fraction_static") is None:
         kwargs.pop("mem_fraction_static", None)
+    # sglang >= 0.5.13 renamed/removed CUDA graph size kwargs.
+    # disable_cuda_graph is still valid and must be preserved for NPU.
+    for _key in ("cuda_graph_max_bs", "cuda_graph_bs"):
+        kwargs.pop(_key, None)
     return ServerArgs(**kwargs)
 
 

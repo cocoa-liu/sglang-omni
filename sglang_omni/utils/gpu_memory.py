@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from sglang_omni.utils.device import get_device_type
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,10 +31,15 @@ class GpuDeviceInfo:
 
 
 def parse_cuda_visible_devices(value: str | None = None) -> list[int | str]:
-    """Parse CUDA_VISIBLE_DEVICES into physical indices, UUIDs, or MIG ids."""
+    """Parse CUDA_VISIBLE_DEVICES or ASCEND_RT_VISIBLE_DEVICES into physical indices."""
 
     if value is None:
-        value = os.environ.get("CUDA_VISIBLE_DEVICES")
+        env_var = (
+            "ASCEND_RT_VISIBLE_DEVICES"
+            if get_device_type() == "npu"
+            else "CUDA_VISIBLE_DEVICES"
+        )
+        value = os.environ.get(env_var)
     if not value:
         return []
 
@@ -67,7 +74,18 @@ def resolve_visible_device_id(
 
 
 def is_process_scoped_memory_available() -> bool:
-    """Return whether NVML process-scoped memory queries are available."""
+    """Return whether process-scoped memory queries are available.
+
+    On NPU, returns torch.npu.is_available().
+    On CUDA, checks NVML availability.
+    """
+    if get_device_type() == "npu":
+        try:
+            import torch
+
+            return torch.npu.is_available()
+        except Exception:
+            return False
 
     pynvml = _try_import_pynvml()
     if pynvml is None:
@@ -88,6 +106,17 @@ def get_process_gpu_memory_bytes(logical_gpu_id: int) -> int | None:
     process-scoped query failed. Invalid device mappings raise RuntimeError
     because those are launch/configuration errors.
     """
+    # NPU path: use torch.npu.memory_stats()
+    if get_device_type() == "npu":
+        try:
+            import torch
+
+            if torch.npu.is_available():
+                stats = torch.npu.memory_stats(logical_gpu_id)
+                return stats.get("allocated_bytes.all.current", 0)
+        except Exception as exc:
+            logger.debug("NPU memory stats query failed for gpu_id=%s: %s", logical_gpu_id, exc)
+        return None
 
     visible_devices = parse_cuda_visible_devices()
     device_id = resolve_visible_device_id(logical_gpu_id, visible_devices)
@@ -139,8 +168,7 @@ def get_gpu_device_info(logical_gpu_id: int) -> GpuDeviceInfo:
     """Return best-effort CUDA device metadata.
 
     NVML is preferred because it follows CUDA_VISIBLE_DEVICES mappings for
-    physical ids and UUIDs. If NVML metadata is unavailable, PyTorch CUDA
-    metadata is used for total memory when possible.
+    physical ids and UUIDs. On NPU, uses torch.npu.get_device_properties().
     """
 
     info = GpuDeviceInfo(
@@ -149,6 +177,23 @@ def get_gpu_device_info(logical_gpu_id: int) -> GpuDeviceInfo:
         name=None,
         total_memory_bytes=None,
     )
+
+    # NPU path: use torch.npu API
+    if get_device_type() == "npu":
+        try:
+            import torch
+
+            props = torch.npu.get_device_properties(logical_gpu_id)
+            return GpuDeviceInfo(
+                logical_gpu_id=logical_gpu_id,
+                device_id=logical_gpu_id,
+                name=props.name if hasattr(props, "name") else str(logical_gpu_id),
+                total_memory_bytes=int(props.total_memory),
+            )
+        except Exception as exc:
+            logger.debug("NPU device info query failed for gpu_id=%s: %s", logical_gpu_id, exc)
+            return info
+
     visible_devices = parse_cuda_visible_devices()
     try:
         device_id = resolve_visible_device_id(logical_gpu_id, visible_devices)
@@ -303,6 +348,9 @@ def gpu_startup_lock(logical_gpu_id: int):
 
 
 def _try_import_pynvml() -> Any | None:
+    """Import pynvml or handle import errors. Returns None on NPU (no NVML)."""
+    if get_device_type() == "npu":
+        return None
     try:
         return importlib.import_module("pynvml")
     except ModuleNotFoundError:

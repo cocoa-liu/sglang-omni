@@ -46,10 +46,16 @@ def set_random_seed(seed: int) -> None:
 def avail_gpu_mem(gpu_id: int) -> float | None:
     """Return currently free GPU memory in GiB, or None when unavailable."""
     try:
-        if not torch.cuda.is_available():
-            return None
-        free_bytes, _ = torch.cuda.mem_get_info(gpu_id)
-        return free_bytes / (1024**3)
+        from sglang_omni.utils.device import get_device_type
+
+        dev_type = get_device_type()
+        if dev_type == "npu":
+            free_bytes, _ = torch.npu.mem_get_info(gpu_id)
+            return free_bytes / (1024**3)
+        if torch.cuda.is_available():
+            free_bytes, _ = torch.cuda.mem_get_info(gpu_id)
+            return free_bytes / (1024**3)
+        return None
     except Exception:
         return None
 

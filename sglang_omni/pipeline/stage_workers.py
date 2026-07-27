@@ -22,6 +22,7 @@ from sglang_omni.pipeline.stage.input import AggregatedInput, DirectInput
 from sglang_omni.pipeline.stage.runtime import Stage
 from sglang_omni.pipeline.stage.stream_queue import StreamQueue
 from sglang_omni.pipeline.tp_control import TPFollowerControlPlane, TPLeaderFanout
+from sglang_omni.utils.device import get_visible_devices_env
 from sglang_omni.utils.gpu_compat import (
     apply_gpu_compat_env_defaults,
     get_gpu_compat_env_defaults,
@@ -368,6 +369,14 @@ def stage_process_main(
     log = logging.getLogger(f"stage_workers.{spec.process_name}")
 
     try:
+        from sglang_omni.utils.device import patch_cuda_lazy_init_for_npu
+
+        patch_cuda_lazy_init_for_npu()
+
+        from sglang_omni.utils.device import patch_inductor_skip_compile_for_npu
+
+        patch_inductor_skip_compile_for_npu()
+
         for stage_spec in spec.stage_specs:
             _prepare_cuda_environment(stage_spec, log)
         apply_gpu_compat_env_defaults()
@@ -537,15 +546,23 @@ def _reclaim_process_cuda_memory(
         )
         for gpu_id in gpu_id_list:
             try:
-                torch.cuda.set_device(int(gpu_id))
-                with suppress(Exception):
-                    torch.cuda.synchronize()
-                torch.cuda.empty_cache()
-                with suppress(Exception):
-                    torch.cuda.ipc_collect()
+                from sglang_omni.utils.device import get_device_type as _gdt
+
+                if _gdt() == "npu":
+                    torch.npu.set_device(int(gpu_id))
+                    with suppress(Exception):
+                        torch.npu.synchronize()
+                    torch.npu.empty_cache()
+                else:
+                    torch.cuda.set_device(int(gpu_id))
+                    with suppress(Exception):
+                        torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+                    with suppress(Exception):
+                        torch.cuda.ipc_collect()
             except Exception as exc:
                 log.warning(
-                    "CUDA memory reclaim failed for gpu_id=%s after %s: %s",
+                    "GPU memory reclaim failed for gpu_id=%s after %s: %s",
                     gpu_id,
                     reason,
                     exc,
@@ -575,8 +592,10 @@ def _construct_stage(
     if gpu_id is not None:
         import torch
 
-        torch.cuda.set_device(int(gpu_id))
-        log.info("Set current CUDA device to %s for stage %s", gpu_id, spec.stage_name)
+        from sglang_omni.utils.device import set_device
+
+        set_device(int(gpu_id))
+        log.info("Set current device to %s for stage %s", gpu_id, spec.stage_name)
 
     # --- Build scheduler via factory ---
     log.info(
@@ -789,7 +808,8 @@ def get_stage_process_env(
         return {}
 
     source_env = env if env is not None else os.environ
-    original_visible = source_env.get("CUDA_VISIBLE_DEVICES")
+    visible_devices_env = get_visible_devices_env()
+    original_visible = source_env.get(visible_devices_env)
     if spec.gpu_id is None:
         raise ValueError(f"tp stage {spec.stage_name!r} requires a GPU id")
     if original_visible:
@@ -797,14 +817,14 @@ def get_stage_process_env(
         if spec.gpu_id >= len(visible_devices):
             raise ValueError(
                 f"tp stage {spec.stage_name!r} assigned gpu_id={spec.gpu_id}, "
-                f"but CUDA_VISIBLE_DEVICES only exposes {visible_devices}"
+                f"but {visible_devices_env} only exposes {visible_devices}"
             )
         mapped_gpu = visible_devices[spec.gpu_id]
     else:
         mapped_gpu = str(spec.gpu_id)
 
     return {
-        "CUDA_VISIBLE_DEVICES": mapped_gpu,
+        visible_devices_env: mapped_gpu,
         "SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS": "true",
         "SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK": "false",
     }
@@ -815,11 +835,13 @@ def _prepare_cuda_environment(
     log: logging.Logger,
 ) -> None:
     """Map TP rank processes to one visible CUDA device before torch init."""
+    visible_devices_env = get_visible_devices_env()
     if os.environ.get("SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS") == "true":
-        mapped_gpu = os.environ.get("CUDA_VISIBLE_DEVICES", str(spec.gpu_id))
+        mapped_gpu = os.environ.get(visible_devices_env, str(spec.gpu_id))
         _normalize_spec_gpu_id_to_local_device(spec)
         log.info(
-            "TP stage %s rank %d sees CUDA_VISIBLE_DEVICES=%s (local gpu_id=0)",
+            "TP stage %s rank %d sees %s=%s (local gpu_id=0)",
+            visible_devices_env,
             spec.stage_name,
             spec.tp_rank,
             mapped_gpu,
@@ -830,15 +852,16 @@ def _prepare_cuda_environment(
     if not env_updates:
         return
 
-    mapped_gpu = env_updates["CUDA_VISIBLE_DEVICES"]
+    mapped_gpu = env_updates[visible_devices_env]
     for key, value in env_updates.items():
         os.environ[key] = value
 
     _normalize_spec_gpu_id_to_local_device(spec)
     log.info(
-        "Mapped TP stage %s rank %d to CUDA_VISIBLE_DEVICES=%s (local gpu_id=0)",
+        "Mapped TP stage %s rank %d to %s=%s (local gpu_id=0)",
         spec.stage_name,
         spec.tp_rank,
+        visible_devices_env,
         mapped_gpu,
     )
 

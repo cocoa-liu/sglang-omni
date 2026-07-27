@@ -81,18 +81,18 @@ def validate_generation_batch_policy(
         server_args.max_running_requests,
         errors,
     )
-    cuda_graph_enabled = not bool(server_args.disable_cuda_graph)
+    cuda_graph_enabled = not bool(getattr(server_args, "disable_cuda_graph", False))
 
     cuda_graph_max_bs: int | None = None
     cuda_graph_bs: tuple[int, ...] | None = None
     if cuda_graph_enabled:
         cuda_graph_max_bs = _validate_positive_int(
             "cuda_graph_max_bs",
-            server_args.cuda_graph_max_bs,
+            getattr(server_args, "cuda_graph_max_bs", None),
             errors,
             required=True,
         )
-        cuda_graph_bs_value = server_args.cuda_graph_bs
+        cuda_graph_bs_value = getattr(server_args, "cuda_graph_bs", None)
         if cuda_graph_bs_value is None:
             errors.append("cuda_graph_bs must be explicit when CUDA graph is enabled")
         else:

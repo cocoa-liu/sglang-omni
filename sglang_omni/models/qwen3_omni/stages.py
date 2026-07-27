@@ -786,9 +786,14 @@ def create_aggregate_executor():
 def create_image_encoder_executor(
     model_path: str,
     *,
-    device: str = "cuda",
+    device: str | None = None,
     dtype: str | None = None,
 ):
+    if device is None:
+        from sglang_omni.utils.device import get_device_string
+
+        device = get_device_string(0)
+
     from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
     model = Qwen3OmniImageEncoder(model_path=model_path, device=device, dtype=dtype)
@@ -858,9 +863,14 @@ def create_image_encoder_executor(
 def create_audio_encoder_executor(
     model_path: str,
     *,
-    device: str = "cuda",
+    device: str | None = None,
     dtype: str | None = None,
 ):
+    if device is None:
+        from sglang_omni.utils.device import get_device_string
+
+        device = get_device_string(0)
+
     from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
     model = Qwen3OmniAudioEncoder(model_path=model_path, device=device, dtype=dtype)
@@ -958,8 +968,10 @@ def create_sglang_thinker_executor_from_config(
     # the streaming-SST thinker path benefits out of the box; either key can be
     # overridden via server_args_overrides (set enable_mixed_chunk=False to opt
     # out). Note: mixed-chunk only engages when chunked_prefill_size > 0.
+    from sglang_omni.utils.device import get_device_type as _gdt
+
     overrides: dict[str, Any] = {
-        "disable_cuda_graph": False,
+        "disable_cuda_graph": _gdt() == "npu",  # NPU: no CUDA graph support
         "enable_mixed_chunk": True,
         "chunked_prefill_size": 8192,
         "sampling_backend": "pytorch",
@@ -1061,6 +1073,7 @@ def create_talker_ar_executor_from_config(
 ):
     """Returns OmniScheduler for talker."""
     from sglang_omni.models.qwen3_omni.bootstrap import create_talker_scheduler
+    from sglang_omni.utils.device import get_device_type
 
     # Note (Xuesong, Chenyang): cuda_graph defaults to ON for the talker
     # after #384, which routed talker MoE through `self.experts` (FusedMoE)
@@ -1073,7 +1086,7 @@ def create_talker_ar_executor_from_config(
     overrides = build_generation_batch_overrides(
         max_running_requests=32,
         server_args_overrides=server_args_overrides,
-        disable_cuda_graph=False,
+        disable_cuda_graph=get_device_type() == "npu",
         sampling_backend="pytorch",
     )
     overrides["tp_size"] = tp_size

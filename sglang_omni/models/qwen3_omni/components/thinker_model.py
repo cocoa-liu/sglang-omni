@@ -4,9 +4,13 @@ import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
-from sgl_kernel import fused_qk_norm_rope
 from torch import nn
 from transformers import PretrainedConfig
+
+try:
+    from sgl_kernel import fused_qk_norm_rope
+except (ImportError, OSError):
+    fused_qk_norm_rope = None
 
 from sglang_omni.models.qwen3_omni.hf_config import Qwen3OmniMoeTextConfig
 from sglang_omni.models.qwen3_omni.quantization import (
@@ -227,7 +231,8 @@ class Qwen3OmniMoeThinkerTextAttention(nn.Module):
             False if isinstance(self.rotary_emb, MRotaryEmbedding) else True
         )
         self.compatible_with_fused_qk_norm_rope = (
-            not isinstance(self.rotary_emb, MRotaryEmbedding)
+            fused_qk_norm_rope is not None
+            and not isinstance(self.rotary_emb, MRotaryEmbedding)
         ) and self.head_dim in (64, 128, 256)
         self.use_fused_qk_norm_rope = (
             get_global_server_args().enable_fused_qk_norm_rope

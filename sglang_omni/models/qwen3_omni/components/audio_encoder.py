@@ -41,10 +41,14 @@ class Qwen3OmniAudioEncoder(nn.Module):
         self,
         model_path: str,
         *,
-        device: str = "cuda",
+        device: str | None = None,
         dtype: str | torch.dtype | None = None,
     ) -> None:
         super().__init__()
+        if device is None:
+            from sglang_omni.utils.device import get_device_type as _gdt
+
+            device = "cpu" if _gdt() == "npu" else "cuda"
         torch_dtype = resolve_dtype(dtype)
         thinker_cfg = load_thinker_config(model_path)
         self._device = torch.device(device)

@@ -28,10 +28,7 @@ dependencies = [
     "fastapi>=0.110.0",       # OpenAI-compatible API adapter
     "uvicorn>=0.23.0",        # ASGI server for FastAPI
     "sglang==0.5.12.post1",
-    "flash-attn-4>=4.0.0b9,<4.0.0b16",  # Avoid cutlass-dsl>=4.5.2 conflict
     "kernels>=0.14.0,<0.15",  # Match Transformers 5.6 / SGLang 0.5.12.post1 stack (ships kernels 0.14.1)
-    "nixl-cu13>=1.1.0",  # CUDA 13 relay wheel; the generic nixl/-cu12 wheel breaks on cu130
-    "mooncake-transfer-engine-cuda13>=0.3.10",  # CUDA 13 relay wheel; generic mooncake-transfer-engine pulls cu12 and breaks `import mooncake` on cu130
     "logger",
     "httpx",
     "xxhash>=3.0.0",
@@ -73,6 +70,15 @@ dependencies = [
     # Ming-Omni
     "diffusers==0.37.0",      # Align with sglang 0.5.12.post1 hard pin (diffusers==0.37.0)
     "x-transformers",          # Ming talker rotary embeddings
+]
+
+[project.optional-dependencies]
+cuda-relay = [
+    "nixl-cu13>=1.1.0",
+    "mooncake-transfer-engine-cuda13>=0.3.10",
+]
+cuda-attn = [
+    "flash-attn-4>=4.0.0b9,<4.0.0b16",
 ]
 
 [project.scripts]

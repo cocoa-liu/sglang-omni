@@ -392,7 +392,11 @@ class Qwen3OmniPreprocessor:
             else:
                 audios = audios_result
         else:
-            messages = inputs
+            # Wrap plain string inputs (e.g. TTS prompt) as a chat messages list
+            if isinstance(inputs, str):
+                messages = [{"role": "user", "content": inputs}]
+            else:
+                messages = inputs
             images = []
             videos = []
             audios = []

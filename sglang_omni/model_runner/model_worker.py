@@ -73,9 +73,44 @@ class ModelWorker:
 
             register_ming_hf_config()
 
-        from sglang.srt.configs.model_config import ModelConfig
+        # Pre-register custom Qwen3-Omni architectures before sglang resolves them
+        if self.model_arch_override in (
+            "Qwen3OmniTalker",
+            "Qwen3OmniThinkerForCausalLM",
+        ):
+            # Mock sgl_kernel so talker/thinker modules can be imported on NPU
+            import sys
+            from unittest.mock import MagicMock
 
-        self.model_config = ModelConfig.from_server_args(
+            for _mod_name in (
+                "sgl_kernel",
+                "sgl_kernel.attention",
+                "sgl_kernel.common",
+            ):
+                if _mod_name not in sys.modules:
+                    _m = MagicMock()
+                    sys.modules[_mod_name] = _m
+
+            from sglang_omni.model_runner.sglang_model_runner import (
+                SGLModelRunner,
+            )
+
+            SGLModelRunner._register_omni_model_static()
+            # Inject real class into transformers for resolve_transformers_arch
+            import transformers
+
+            from sglang.srt.models.registry import ModelRegistry
+
+            if self.model_arch_override in ModelRegistry.models:
+                setattr(
+                    transformers,
+                    self.model_arch_override,
+                    ModelRegistry.models[self.model_arch_override],
+                )
+
+        from sglang.srt.configs.model_config import ModelConfig as _MC
+
+        self.model_config = _MC.from_server_args(
             server_args=self.server_args,
             model_path=self.server_args.model_path,
             model_revision=self.server_args.revision,
@@ -89,6 +124,14 @@ class ModelWorker:
     def _apply_arch_override(model_config: ModelConfig, arch: str) -> None:
         """Override model config for a sub-model architecture."""
         model_config.hf_config.architectures = [arch]
+        # sglang >= 0.5.13 requires auto_map or model_impl=TRANSFORMERS for
+        # custom architectures not in the transformers library
+        if not getattr(model_config.hf_config, "auto_map", None):
+            model_config.hf_config.auto_map = {}
+        # Bypass auto_map loading failure: use TRANSFORMERS impl directly
+        model_config.model_impl = getattr(
+            model_config, "model_impl", None
+        ) or 1  # ModelImpl.TRANSFORMERS == 1
         if arch == "WhisperForConditionalGeneration":
             cfg = model_config.hf_config
             model_config.hf_text_config = cfg
@@ -109,6 +152,9 @@ class ModelWorker:
         sub_cfg = getattr(model_config.hf_config, sub_config_attr, None)
         if sub_cfg is None:
             return
+        # sglang >= 0.5.13 requires auto_map.AutoModel for custom architectures
+        if not getattr(sub_cfg, "auto_map", None):
+            sub_cfg.auto_map = {"AutoModel": arch}
         text_cfg = getattr(sub_cfg, text_config_attr) if text_config_attr else sub_cfg
         model_config.hf_text_config = text_cfg
         model_config.num_attention_heads = text_cfg.num_attention_heads
@@ -135,7 +181,10 @@ class ModelWorker:
         )
 
     def get_worker_info(self):
-        max_total_num_tokens = self.model_runner.max_total_num_tokens
+        max_total_num_tokens = getattr(
+            self.model_runner, "max_total_num_tokens",
+            self.server_args.max_running_requests * self.server_args.context_length,
+        )
         max_req_len = min(self.server_args.context_length - 1, max_total_num_tokens - 1)
         max_req_input_len = max_req_len - 1
         req_pool = self.model_runner.req_to_token_pool

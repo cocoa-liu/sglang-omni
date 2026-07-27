@@ -23,8 +23,12 @@ logger = logging.getLogger(__name__)
 
 
 def load_code2wav_model(
-    model_path: str, *, device: str = "cuda", dtype: str | None = None
+    model_path: str, *, device: str | None = None, dtype: str | None = None
 ):
+    if device is None:
+        from sglang_omni.utils.device import get_device_type as _gdt
+
+        device = "cpu" if _gdt() == "npu" else "cuda"
     """Load Code2Wav model from HF checkpoint."""
     from transformers import AutoConfig
 
@@ -148,6 +152,11 @@ class Code2WavScheduler(StreamingSimpleScheduler):
                 )
             return []
         self._code_chunks[request_id].append(codes)
+        # Code2Wav has a time-axis Transformer. For a non-streaming request,
+        # decoding fixed windows plus a finite left context is not equivalent to
+        # decoding the complete code sequence, so defer vocoding until done.
+        if not self._stream_enabled[request_id]:
+            return []
         ready = len(self._code_chunks[request_id]) - self._emitted[request_id]
         if ready >= self._stream_chunk_size:
             return self._decode_and_emit(request_id)
@@ -158,7 +167,12 @@ class Code2WavScheduler(StreamingSimpleScheduler):
         chunks = self._code_chunks[request_id]
         emitted = self._emitted[request_id]
         messages: list[OutgoingMessage] = []
-        if chunks and emitted < len(chunks):
+        if chunks and not self._stream_enabled.get(request_id, False):
+            audio = self._decode_incremental(request_id, chunks, 0, len(chunks))
+            self._emitted[request_id] = len(chunks)
+            if audio.size > 0:
+                self._audio_chunks[request_id].append(audio)
+        elif chunks and emitted < len(chunks):
             messages.extend(self._decode_and_emit(request_id))
 
         # Build final output
@@ -241,8 +255,10 @@ class Code2WavScheduler(StreamingSimpleScheduler):
         window = torch.stack(code_chunks[start - context : end], dim=0)
         codes = window.transpose(0, 1).unsqueeze(0)
         with torch.no_grad():
-            if self._device.type == "cuda":
-                torch.cuda.set_device(self._device)
+            if self._device.type in ("cuda", "npu"):
+                from sglang_omni.utils.device import set_device
+
+                set_device(self._device)
             wav = self._model(codes)
         trim = context * self._total_upsample
         if trim:
@@ -271,15 +287,21 @@ class Code2WavScheduler(StreamingSimpleScheduler):
 def create_code2wav_scheduler(
     model_path: str,
     *,
-    device: str = "cuda",
+    device: str | None = None,
     dtype: str | None = None,
     gpu_id: int | None = None,
     stream_chunk_size: int = 10,
     left_context_size: int = 25,
 ):
     """Factory: returns Code2WavScheduler."""
+    if device is None:
+        from sglang_omni.utils.device import get_device_type as _gdt
+
+        device = "cpu" if _gdt() == "npu" else "cuda"
     if gpu_id is not None:
-        device = f"cuda:{gpu_id}"
+        from sglang_omni.utils.device import get_device_string
+
+        device = get_device_string(gpu_id)
     model = load_code2wav_model(model_path, device=device, dtype=dtype)
     return Code2WavScheduler(
         model,

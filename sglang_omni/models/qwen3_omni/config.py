@@ -53,7 +53,7 @@ def _image_encoder_stage(*, gpu: int, process: str) -> StageConfig:
         name="image_encoder",
         process=process,
         factory=f"{_PKG}.stages.create_image_encoder_executor",
-        factory_args={"device": "cuda", "dtype": None},
+        factory_args={"dtype": None},
         gpu=gpu,
         next="mm_aggregate",
         project_payload={
@@ -67,7 +67,7 @@ def _audio_encoder_stage(*, gpu: int, process: str) -> StageConfig:
         name="audio_encoder",
         process=process,
         factory=f"{_PKG}.stages.create_audio_encoder_executor",
-        factory_args={"device": "cuda", "dtype": None},
+        factory_args={"dtype": None},
         gpu=gpu,
         next="mm_aggregate",
         project_payload={
@@ -185,7 +185,7 @@ def _code2wav_stage(*, gpu: int, process: str) -> StageConfig:
         name="code2wav",
         process=process,
         factory=f"{_PKG}.components.code2wav_scheduler.create_code2wav_scheduler",
-        factory_args={"device": "cuda"},
+        factory_args={},
         gpu=gpu,
         terminal=True,
         can_accept_stream_before_payload=True,

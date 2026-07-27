@@ -170,9 +170,9 @@ def build_relay_config(
 def parse_gpu_id(device: str) -> int | None:
     if device == "cpu":
         return None
-    if device == "cuda":
+    if device in ("cuda", "npu"):
         return 0
-    if device.startswith("cuda:"):
+    if device.startswith(("cuda:", "npu:")):
         return int(device.split(":", 1)[1])
     raise ValueError(f"Unsupported device string: {device}")
 
