@@ -5,6 +5,7 @@ import os
 import socket
 from dataclasses import dataclass
 from types import SimpleNamespace
+from sglang_omni.utils.device import get_device_type
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -473,7 +474,9 @@ def _apply_model_worker_backend_policy(
         # Note:(Chenchen Hong) flashinfer_cutlass MoE deadlocks CUDA-graph
         # capture on H20 (no H20 kernel coverage); triton captures cleanly there.
         server_args.moe_runner_backend = (
-            "triton" if _is_h20_device() else "flashinfer_cutlass"
+            "triton"
+            if (_is_h20_device() or get_device_type() == "npu")
+            else "flashinfer_cutlass"
         )
         moe_runner_backend = server_args.moe_runner_backend
 
