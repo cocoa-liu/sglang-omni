@@ -887,21 +887,8 @@ class Qwen3OmniTalker(nn.Module):
 
     @staticmethod
     def _sample_code_predictor_token(logits: torch.Tensor) -> torch.Tensor:
-        """Match the reference residual-code sampler without SGLang kernels."""
-        scores = logits[:, -1, :].float()
-        top_k = min(50, scores.shape[-1])
-        kth = torch.topk(scores, top_k, dim=-1).values[:, -1:]
-        scores = scores.masked_fill(scores < kth, float("-inf"))
-
-        sorted_scores, sorted_indices = torch.sort(scores, dim=-1, descending=True)
-        sorted_probs = torch.softmax(sorted_scores, dim=-1)
-        remove = torch.cumsum(sorted_probs, dim=-1) > 0.8
-        remove[:, 0] = False
-        sorted_scores = sorted_scores.masked_fill(remove, float("-inf"))
-        probs = torch.zeros_like(sorted_scores).scatter_(
-            1, sorted_indices, torch.softmax(sorted_scores, dim=-1)
-        )
-        return torch.multinomial(probs, num_samples=1)
+        """Match HF generate(do_sample=False, temperature=0.0) behavior."""
+        return torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
 
     def prepare_decode_buffers(self, requests: list) -> None:
         batch_size = len(requests)
@@ -1159,39 +1146,6 @@ class Qwen3OmniTalker(nn.Module):
             next_token_logits=logits,
             hidden_states=None,
         )
-        if self._device.type == "npu":
-            # Avoid SGLang's seeded Triton sampler, whose murmur-hash kernel does
-            # not compile with the current Ascend BiSheng stack. Preserve the
-            # Talker request's temperature/top-k/top-p distribution with native
-            # PyTorch operations instead of changing speech generation to greedy.
-            sampled_rows = []
-            for row_idx in range(batch_size):
-                row = logits[row_idx].float()
-                temperature = max(
-                    float(self._sampling_temperatures[row_idx, 0].item()), 1e-5
-                )
-                row = row / temperature
-                top_k = int(self._sampling_top_ks[row_idx].item())
-                if 0 < top_k < row.numel():
-                    kth = torch.topk(row, top_k).values[-1]
-                    row = row.masked_fill(row < kth, float("-inf"))
-
-                top_p = float(self._sampling_top_ps[row_idx].item())
-                if top_p < 1.0:
-                    sorted_logits, sorted_indices = torch.sort(
-                        row, descending=True
-                    )
-                    remove = torch.cumsum(
-                        torch.softmax(sorted_logits, dim=-1), dim=-1
-                    ) > top_p
-                    remove[0] = False
-                    row = row.scatter(
-                        0,
-                        sorted_indices,
-                        sorted_logits.masked_fill(remove, float("-inf")),
-                    )
-                sampled_rows.append(torch.multinomial(torch.softmax(row, dim=-1), 1))
-            return torch.cat(sampled_rows, dim=0)
         if self._sampler is None:
             return torch.argmax(logits, dim=-1)
         sampling_info = self._build_static_sampling_info(batch_size)
@@ -1346,19 +1300,14 @@ class Qwen3OmniTalker(nn.Module):
                     next_code
                 ).to(dtype=predictor_input.dtype)
                 predictor_input[:, layer_idx + 2, :] = new_embed[:, 0, :]
+                pos_summed.add_(new_embed[:, 0, :])
                 if layer_idx < num_groups - 2:
-                    # HF generate feeds each residual predictor hidden state
-                    # (not its codec embedding) back into the Talker. Only the
-                    # final residual group contributes its embedding directly.
                     last_hidden = self._predictor_forward_one_token(
                         token_embeds=new_embed,
                         batch_size=batch_size,
                         cache_len=cache_len,
                     )
-                    pos_summed.add_(last_hidden[:, 0, :])
                     cache_len += 1
-                else:
-                    pos_summed.add_(new_embed[:, 0, :])
 
         return result_codes, summed_embeddings
 
