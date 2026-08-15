@@ -45,11 +45,13 @@ class MingTalkerExecutor:
         talker_model_path: str | None = None,
         device: str = "cuda",
         voice: str = DEFAULT_VOICE,
+        enable_cuda_graph: bool = True,
     ):
         self._model_path = model_path
         self._talker_model_path = talker_model_path or str(Path(model_path) / "talker")
         self._device = device
         self._voice = voice
+        self._enable_cuda_graph = enable_cuda_graph
         self._results: asyncio.Queue[StagePayload] = asyncio.Queue()
         self._aborted: set[str] = set()
 
@@ -86,9 +88,11 @@ class MingTalkerExecutor:
         # 1. Load config from checkpoint
         t0 = time.time()
         config = MingOmniTalkerConfig.from_pretrained_dir(self._talker_model_path)
+        if torch.device(self._device).type == "npu":
+            config.use_torch_attention()
 
         # 2. Create model (no weights yet)
-        self._talker = MingOmniTalker(config)
+        self._talker = MingOmniTalker(config, enable_cuda_graph=self._enable_cuda_graph)
         self._talker.eval()
 
         # 3. Stream weights, then move to device with bf16
@@ -167,11 +171,14 @@ class MingTalkerExecutor:
         except Exception as e:
             logger.warning("[TALKER] Could not load thinker tokenizer: %s", e)
 
-        # 10. Initialize CUDA graphs
-        logger.info("[TALKER] Initializing CUDA graphs...")
+        # 10. Initialize the configured execution path
+        logger.info(
+            "[TALKER] Initializing execution path (cuda_graph=%s)...",
+            self._enable_cuda_graph,
+        )
         t0g = time.time()
         self._talker.initial_graph()
-        logger.info("[TALKER] CUDA graphs initialized in %.1fs", time.time() - t0g)
+        logger.info("[TALKER] Execution path initialized in %.1fs", time.time() - t0g)
 
     async def add_request(self, payload: StagePayload) -> None:
         """Process a TTS request."""

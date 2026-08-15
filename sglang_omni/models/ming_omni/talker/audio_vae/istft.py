@@ -1,5 +1,5 @@
 import torch
-import torch.nn as nn
+from torch import nn
 
 
 class ISTFT(nn.Module):
@@ -75,6 +75,17 @@ class ISTFT(nn.Module):
         Returns:
             Tensor: Reconstructed time-domain signal of shape (B, L), where L is the length of the output signal.
         """
+        if spec.device.type == "npu":
+            # The large overlap-add used by Ming (n_fft=3528) can trigger an
+            # Ascend vector-core fault in torch.nn.functional.fold. Keep the
+            # neural decoder and spectrogram on NPU, but run only ISTFT on CPU.
+            spec = spec.cpu()
+            audio_buffer = audio_buffer.cpu() if audio_buffer is not None else None
+            window_buffer = window_buffer.cpu() if window_buffer is not None else None
+            window = self.window.float().cpu()
+        else:
+            window = self.window
+
         if self.padding == "center":
             # Fallback to pytorch native implementation
             return torch.istft(
@@ -82,7 +93,7 @@ class ISTFT(nn.Module):
                 self.n_fft,
                 self.hop_length,
                 self.win_length,
-                self.window,
+                window,
                 center=True,
             )
         elif self.padding == "same":
@@ -91,11 +102,11 @@ class ISTFT(nn.Module):
             raise ValueError("Padding must be 'center' or 'same'.")
 
         assert spec.dim() == 3, "Expected a 3D tensor as input"
-        B, N, T = spec.shape
+        _, _, T = spec.shape
 
         # Inverse FFT
         ifft = torch.fft.irfft(spec, self.n_fft, dim=1, norm="backward")
-        ifft = ifft * self.window[None, :, None]
+        ifft = ifft * window[None, :, None]
 
         # Overlap and Add
         output_size = (T - 1) * self.hop_length + self.win_length
@@ -111,7 +122,7 @@ class ISTFT(nn.Module):
         )
 
         # Window envelope
-        window_sq = self.window.square().expand(1, T, -1).transpose(1, 2)
+        window_sq = window.square().expand(1, T, -1).transpose(1, 2)
         window_envelope = (
             torch.nn.functional.fold(
                 window_sq,
