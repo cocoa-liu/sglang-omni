@@ -323,7 +323,9 @@ def load_video_path(
         ele["total_pixels"] = int(total_pixels)
     backend = qwen_vision.get_video_reader_backend()
     try:
-        video, sample_fps = qwen_vision.VIDEO_READER_BACKENDS[backend](ele)
+        video, sample_fps = _unpack_video_reader_result(
+            qwen_vision.VIDEO_READER_BACKENDS[backend](ele)
+        )
     except Exception as backend_exc:
         if backend == "torchvision":
             raise VideoDecodeError(
@@ -332,7 +334,9 @@ def load_video_path(
             ) from backend_exc
         logger.warning("Video reader %s failed, falling back to torchvision", backend)
         try:
-            video, sample_fps = qwen_vision.VIDEO_READER_BACKENDS["torchvision"](ele)
+            video, sample_fps = _unpack_video_reader_result(
+                qwen_vision.VIDEO_READER_BACKENDS["torchvision"](ele)
+            )
         except Exception as fallback_exc:
             raise VideoDecodeError(
                 f"Failed to decode video path={path}; {backend} failed with "
@@ -341,11 +345,14 @@ def load_video_path(
                 f"{fallback_exc}"
             ) from fallback_exc
     nframes, _, height, width = video.shape
-    min_pixels = ele.get("min_pixels", qwen_vision.VIDEO_MIN_PIXELS)
-    total_pixels = ele.get("total_pixels", qwen_vision.VIDEO_TOTAL_PIXELS)
+    image_factor, default_min_pixels, default_max_pixels, default_total_pixels = (
+        _video_resize_defaults()
+    )
+    min_pixels = ele.get("min_pixels", default_min_pixels)
+    total_pixels = ele.get("total_pixels", default_total_pixels)
     max_pixels = max(
         min(
-            qwen_vision.VIDEO_MAX_PIXELS,
+            default_max_pixels,
             total_pixels / nframes * qwen_vision.FRAME_FACTOR,
         ),
         int(min_pixels * 1.05),
@@ -356,13 +363,13 @@ def load_video_path(
         resized_height, resized_width = qwen_vision.smart_resize(
             ele["resized_height"],
             ele["resized_width"],
-            factor=qwen_vision.IMAGE_FACTOR,
+            factor=image_factor,
         )
     else:
         resized_height, resized_width = qwen_vision.smart_resize(
             height,
             width,
-            factor=qwen_vision.IMAGE_FACTOR,
+            factor=image_factor,
             min_pixels=min_pixels,
             max_pixels=max_pixels,
         )
@@ -373,6 +380,55 @@ def load_video_path(
         antialias=True,
     ).float()
     return video, sample_fps
+
+
+def _unpack_video_reader_result(result: Any) -> tuple[torch.Tensor, float]:
+    """Normalize qwen-vl-utils video reader return values.
+
+    qwen-vl-utils readers historically returned ``(video, sample_fps)``.
+    Newer releases return ``(video, metadata, sample_fps)`` while retaining
+    the old two-item return annotation in some versions.  Keep this boundary
+    compatible with both contracts so a dependency upgrade does not silently
+    drop video inputs from multimodal requests.
+    """
+    if not isinstance(result, (tuple, list)):
+        raise TypeError(
+            "Video reader must return (video, sample_fps) or "
+            "(video, metadata, sample_fps)"
+        )
+    if len(result) == 2:
+        video, sample_fps = result
+    elif len(result) == 3:
+        video, _metadata, sample_fps = result
+    else:
+        raise ValueError(
+            f"Video reader must return 2 or 3 values, but returned {len(result)}"
+        )
+    return video, float(sample_fps)
+
+
+def _video_resize_defaults(
+    vision_module: Any = qwen_vision,
+) -> tuple[int, int, int, float]:
+    """Return resize defaults for old and new qwen-vl-utils releases."""
+    image_factor = getattr(vision_module, "IMAGE_FACTOR", None)
+    if image_factor is None:
+        # qwen-vl-utils >= 0.0.14 computes this inside fetch_video using the
+        # default image patch size (14) and the configured spatial merge size.
+        image_factor = 14 * int(vision_module.SPATIAL_MERGE_SIZE)
+
+    factor_squared = int(image_factor) ** 2
+    min_pixels = getattr(vision_module, "VIDEO_MIN_PIXELS", None)
+    if min_pixels is None:
+        min_pixels = int(vision_module.VIDEO_MIN_TOKEN_NUM) * factor_squared
+    max_pixels = getattr(vision_module, "VIDEO_MAX_PIXELS", None)
+    if max_pixels is None:
+        max_pixels = int(vision_module.VIDEO_MAX_TOKEN_NUM) * factor_squared
+    total_pixels = getattr(vision_module, "VIDEO_TOTAL_PIXELS", None)
+    if total_pixels is None:
+        total_pixels = float(vision_module.MODEL_SEQ_LEN) * factor_squared * 0.9
+
+    return int(image_factor), int(min_pixels), int(max_pixels), float(total_pixels)
 
 
 def build_video_mm_inputs(hf_inputs: dict[str, Any]) -> dict[str, Any]:
