@@ -26,8 +26,26 @@ from sglang_omni.models.ming_omni.pipeline.next_stage import (
     THINKER_STAGE,
 )
 from sglang_omni.models.ming_omni.tp_utils import validate_stage_tp_support
+from sglang_omni.platforms import current_platform
 
 _PKG = "sglang_omni.models.ming_omni"
+
+
+def _thinker_server_args_overrides() -> dict[str, Any]:
+    """Return conservative platform defaults for the Ming thinker."""
+    if current_platform.is_npu():
+        return {"disable_cuda_graph": True}
+    return {}
+
+
+def _thinker_factory_args(*, enable_streaming_tts: bool = False) -> dict[str, Any]:
+    args: dict[str, Any] = {"thinker_max_seq_len": 8192}
+    overrides = _thinker_server_args_overrides()
+    if overrides:
+        args["server_args_overrides"] = overrides
+    if enable_streaming_tts:
+        args["enable_streaming_tts"] = True
+    return args
 
 
 def _stage_by_name(stages: list[StageConfig], name: str) -> StageConfig | None:
@@ -105,7 +123,7 @@ def _audio_encoder_stage(*, gpu: int, process: str) -> StageConfig:
         name=AUDIO_STAGE,
         process=process,
         factory=f"{_PKG}.stages.create_audio_encoder_executor",
-        factory_args={"device": "cuda", "dtype": None},
+        factory_args={"device": current_platform.device_type, "dtype": None},
         gpu=gpu,
         next=AGGREGATE_STAGE,
         project_payload={
@@ -121,7 +139,7 @@ def _image_encoder_stage(
         name=IMAGE_STAGE,
         process=process,
         factory=f"{_PKG}.stages.create_image_encoder_executor",
-        factory_args={"device": "cuda", "dtype": None},
+        factory_args={"device": current_platform.device_type, "dtype": None},
         gpu=gpu,
         tp_size=tp_size,
         next=AGGREGATE_STAGE,
@@ -154,7 +172,7 @@ def _thinker_stage(*, gpu: int, speech_enabled: bool, process: str) -> StageConf
         name=THINKER_STAGE,
         process=process,
         factory=f"{_PKG}.stages.create_sglang_thinker_executor_from_config",
-        factory_args={"thinker_max_seq_len": 8192},
+        factory_args=_thinker_factory_args(),
         gpu=gpu,
         next=[DECODE_STAGE, TALKER_STAGE] if speech_enabled else DECODE_STAGE,
         stream_to=[DECODE_STAGE],
@@ -173,7 +191,7 @@ def _streaming_thinker_stage(*, gpu: int, process: str) -> StageConfig:
         name=THINKER_STAGE,
         process=process,
         factory=f"{_PKG}.stages.create_sglang_thinker_executor_from_config",
-        factory_args={"thinker_max_seq_len": 8192, "enable_streaming_tts": True},
+        factory_args=_thinker_factory_args(enable_streaming_tts=True),
         gpu=gpu,
         next=[DECODE_STAGE, SEGMENTER_STAGE],
         stream_to=[DECODE_STAGE, SEGMENTER_STAGE],
