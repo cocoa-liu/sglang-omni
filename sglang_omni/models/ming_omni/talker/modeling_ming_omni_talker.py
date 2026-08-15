@@ -27,6 +27,7 @@ from transformers import Qwen2Config, Qwen2Model, StaticCache
 from sglang_omni.utils.audio_features import cached_fbank
 
 from .configuration_bailing_talker import MingOmniTalkerConfig
+from .device_runtime import TalkerDeviceRuntime
 from .front.number_en import normalize_numbers
 from .front.text_segment_cut import cut_text_by_semantic_length, is_chinese
 from .front.toolkit import tokenize_mixed_text_iterator
@@ -37,6 +38,15 @@ from .talker_module.dit import DiT
 logger = logging.getLogger(__name__)
 
 _TOKEN_DONE = object()
+
+
+def _load_local_audio(path: str) -> tuple[torch.Tensor, int]:
+    """Load a local waveform without requiring TorchCodec CUDA libraries."""
+    import soundfile as sf
+
+    waveform, sample_rate = sf.read(path, dtype="float32", always_2d=True)
+    return torch.from_numpy(waveform.T).contiguous(), sample_rate
+
 
 # ---------- Optional: onnxruntime for speaker embedding ----------
 try:
@@ -78,8 +88,7 @@ class SpkembExtractor:
             self.campplus_session.run(
                 None,
                 {
-                    self.campplus_session.get_inputs()[0]
-                    .name: feat.unsqueeze(dim=0)
+                    self.campplus_session.get_inputs()[0].name: feat.unsqueeze(dim=0)
                     .cpu()
                     .numpy()
                 },
@@ -94,11 +103,14 @@ class SpkembExtractor:
 
 
 class CFMGraphExecutor:
-    def __init__(self, config, cfm, aggregator, stop_head):
+    def __init__(
+        self, config, cfm, aggregator, stop_head, *, enable_cuda_graph: bool = True
+    ):
         self.config = config
         self.cfm = cfm
         self.aggregator = aggregator
         self.stop_head = stop_head
+        self.enable_cuda_graph = enable_cuda_graph
         self.initialized = False
         self.last_hidden_state_placeholder = None
         self.his_lat_placeholder = None
@@ -122,7 +134,7 @@ class CFMGraphExecutor:
     ):
         if abort_event is not None and abort_event.is_set():
             raise asyncio.CancelledError()
-        bat_size, his_patch_size, z_dim = his_lat.shape
+        bat_size, _, z_dim = his_lat.shape
         randn_tensor = torch.randn(
             (bat_size, self.config.patch_size, z_dim),
             device=input_tensor.device,
@@ -136,6 +148,19 @@ class CFMGraphExecutor:
             device=input_tensor.device,
             dtype=input_tensor.dtype,
         )
+
+        if not self.enable_cuda_graph:
+            return self._execute_eager(
+                input_tensor,
+                his_lat,
+                randn_tensor,
+                t,
+                cfg_strength,
+                sigma,
+                temperature,
+                sde_rnd,
+                abort_event,
+            )
 
         if not self.initialized:
             if abort_event is not None and abort_event.is_set():
@@ -168,6 +193,38 @@ class CFMGraphExecutor:
         stop_out = torch.empty_like(self.stop_out_placeholder)
         stop_out.copy_(self.stop_out_placeholder)
 
+        return gen_lat, inputs_embeds, stop_out
+
+    def _execute_eager(
+        self,
+        input_tensor,
+        his_lat,
+        randn_tensor,
+        timesteps,
+        cfg_strength,
+        sigma,
+        temperature,
+        sde_rnd,
+        abort_event,
+    ):
+        sde_args = torch.tensor(
+            [cfg_strength, sigma, temperature],
+            device=input_tensor.device,
+            dtype=input_tensor.dtype,
+        )
+        gen_lat = self.cfm.sample(
+            input_tensor,
+            his_lat,
+            randn_tensor,
+            timesteps,
+            sde_args,
+            sde_rnd,
+            abort_event=abort_event,
+        )
+        if abort_event is not None and abort_event.is_set():
+            raise asyncio.CancelledError()
+        inputs_embeds = self.aggregator(gen_lat)
+        stop_out = self.stop_head(input_tensor[:, -1, :]).softmax(dim=-1)
         return gen_lat, inputs_embeds, stop_out
 
     def _initialize_graph(
@@ -218,12 +275,22 @@ class CFMGraphExecutor:
 
 
 class CFMGraphExecutorPool:
-    def __init__(self, config, cfm, aggregator, stop_head, pool_size=5):
+    def __init__(
+        self,
+        config,
+        cfm,
+        aggregator,
+        stop_head,
+        pool_size=5,
+        *,
+        enable_cuda_graph: bool = True,
+    ):
         self.config = config
         self.cfm = cfm
         self.aggregator = aggregator
         self.stop_head = stop_head
         self.pool_size = pool_size
+        self.enable_cuda_graph = enable_cuda_graph
         self.pool: Queue = Queue(maxsize=pool_size)
         self.lock = Lock()
         self._initialize_pool()
@@ -231,7 +298,13 @@ class CFMGraphExecutorPool:
     def _initialize_pool(self):
         for _ in range(self.pool_size):
             self.pool.put(
-                CFMGraphExecutor(self.config, self.cfm, self.aggregator, self.stop_head)
+                CFMGraphExecutor(
+                    self.config,
+                    self.cfm,
+                    self.aggregator,
+                    self.stop_head,
+                    enable_cuda_graph=self.enable_cuda_graph,
+                )
             )
 
     def acquire(self):
@@ -270,9 +343,10 @@ class MingOmniTalker(nn.Module):
     - spk_head: nn.Linear(192, 896)
     """
 
-    def __init__(self, config: MingOmniTalkerConfig):
+    def __init__(self, config: MingOmniTalkerConfig, *, enable_cuda_graph: bool = True):
         super().__init__()
         self.config = config
+        self.enable_cuda_graph = enable_cuda_graph
 
         # Qwen2 LLM backbone
         self.model_config = Qwen2Config(**config.llm_config)
@@ -321,7 +395,9 @@ class MingOmniTalker(nn.Module):
             self.aggregator,
             self.stop_head,
             self.max_conc,
+            enable_cuda_graph=self.enable_cuda_graph,
         )
+        self._device_runtime: TalkerDeviceRuntime | None = None
         self.model_graph_pool: queue.Queue = queue.Queue()
         self.past_key_values = None
         for _ in range(self.max_conc):
@@ -365,9 +441,9 @@ class MingOmniTalker(nn.Module):
             if param.numel() == 1 and loaded_weight.numel() == 1:
                 param.data.fill_(loaded_weight.item())
             else:
-                assert (
-                    param.size() == loaded_weight.size()
-                ), f"Shape mismatch for {name}: param={param.size()}, weight={loaded_weight.size()}"
+                assert param.size() == loaded_weight.size(), (
+                    f"Shape mismatch for {name}: param={param.size()}, weight={loaded_weight.size()}"
+                )
                 param.data.copy_(loaded_weight)
             loaded.add(name)
 
@@ -399,6 +475,9 @@ class MingOmniTalker(nn.Module):
             self.tokenizer = tokenizer
 
         with self.initial_lock:
+            if not self.enable_cuda_graph:
+                self.initialized = True
+                return
             if not self.initialized:
                 for _ in range(self.max_conc):
                     this_uuid = str(uuid.uuid1())
@@ -446,6 +525,31 @@ class MingOmniTalker(nn.Module):
     @property
     def dtype(self):
         return next(self.parameters()).dtype
+
+    def _get_device_runtime(self) -> TalkerDeviceRuntime:
+        device = torch.device(self.device)
+        runtime = getattr(self, "_device_runtime", None)
+        if runtime is None or runtime.device != device:
+            runtime = TalkerDeviceRuntime(device)
+            self._device_runtime = runtime
+        return runtime
+
+    def _model_decode_forward(
+        self,
+        *,
+        inputs_embeds,
+        cache_position,
+        past_key_values,
+    ):
+        return self.model(
+            position_ids=None,
+            cache_position=cache_position,
+            attention_mask=None,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=True,
+            output_hidden_states=True,
+        )
 
     @torch.no_grad()
     def generate(
@@ -543,41 +647,46 @@ class MingOmniTalker(nn.Module):
                     )
                 else:
                     past_seen_tokens = past_key_values.get_seq_length()
+                    if isinstance(past_seen_tokens, torch.Tensor):
+                        past_seen_tokens = int(past_seen_tokens.item())
                     cache_position = torch.arange(
                         past_seen_tokens,
                         past_seen_tokens + inputs_embeds.shape[1],
                         device=inputs_embeds.device,
                     )
 
-                    if model_graph is None:
-                        model_graph = torch.cuda.CUDAGraph()
-                        inputs_embeds_placeholder = torch.empty_like(inputs_embeds)
-                        position_ids_placeholder = None
-                        attention_mask_placeholder = None
-                        cache_position_placeholder = torch.empty_like(cache_position)
-
-                        inputs_embeds_placeholder.copy_(inputs_embeds)
-                        cache_position_placeholder.copy_(cache_position)
-
-                        with torch.cuda.graph(
-                            model_graph, capture_error_mode="thread_local"
-                        ):
-                            outputs_placeholder = self.model(
-                                position_ids=position_ids_placeholder,
-                                cache_position=cache_position_placeholder,
-                                attention_mask=attention_mask_placeholder,
-                                past_key_values=past_key_values,
-                                inputs_embeds=inputs_embeds_placeholder,
-                                use_cache=True,
-                                output_hidden_states=True,
-                            )
+                    if not getattr(self, "enable_cuda_graph", True):
+                        outputs = self._model_decode_forward(
+                            inputs_embeds=inputs_embeds,
+                            cache_position=cache_position,
+                            past_key_values=past_key_values,
+                        )
                     else:
-                        inputs_embeds_placeholder.copy_(inputs_embeds)
-                        if cache_position_placeholder is not None:
-                            cache_position_placeholder.copy_(cache_position)
-                        model_graph.replay()
+                        if model_graph is None:
+                            model_graph = torch.cuda.CUDAGraph()
+                            inputs_embeds_placeholder = torch.empty_like(inputs_embeds)
+                            cache_position_placeholder = torch.empty_like(
+                                cache_position
+                            )
 
-                    outputs = outputs_placeholder
+                            inputs_embeds_placeholder.copy_(inputs_embeds)
+                            cache_position_placeholder.copy_(cache_position)
+
+                            with torch.cuda.graph(
+                                model_graph, capture_error_mode="thread_local"
+                            ):
+                                outputs_placeholder = self._model_decode_forward(
+                                    inputs_embeds=inputs_embeds_placeholder,
+                                    cache_position=cache_position_placeholder,
+                                    past_key_values=past_key_values,
+                                )
+                        else:
+                            inputs_embeds_placeholder.copy_(inputs_embeds)
+                            if cache_position_placeholder is not None:
+                                cache_position_placeholder.copy_(cache_position)
+                            model_graph.replay()
+
+                        outputs = outputs_placeholder
 
                 hidden_out = outputs.hidden_states[-1][:, -1:, :]
 
@@ -641,9 +750,9 @@ class MingOmniTalker(nn.Module):
         abort_event: threading.Event | None = None,
         max_decode_steps: int | None = None,
     ):
-        assert (
-            self.tokenizer is not None
-        ), "Tokenizer not set. Call set_tokenizer() first."
+        assert self.tokenizer is not None, (
+            "Tokenizer not set. Call set_tokenizer() first."
+        )
         tokenizer = self.tokenizer
 
         spk_emb_prompt: list = []
@@ -726,7 +835,12 @@ class MingOmniTalker(nn.Module):
                 :,
             ] = prompt_wav_emb[0].to(dtype=torch.bfloat16)
 
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        device_type = self.device.type
+        with torch.autocast(
+            device_type=device_type,
+            dtype=torch.bfloat16,
+            enabled=device_type in {"cuda", "npu"},
+        ):
             for audio_token in self.generate(
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,
@@ -828,7 +942,8 @@ class MingOmniTalker(nn.Module):
         max_decode_steps: int | None = None,
     ):
         try:
-            with torch.cuda.stream(torch.cuda.Stream(self.device)):
+            runtime = self._get_device_runtime()
+            with runtime.stream_context(runtime.new_stream()):
                 for audio_token in self.omni_audio_generation_func(
                     prompt=prompt,
                     text=text,
@@ -845,7 +960,7 @@ class MingOmniTalker(nn.Module):
                 ):
                     if abort_event is not None and abort_event.is_set():
                         raise asyncio.CancelledError()
-                    torch.cuda.current_stream().synchronize()
+                    runtime.synchronize()
                     if token_queue is not None:
                         token_queue.put(audio_token)
                     else:
@@ -874,7 +989,8 @@ class MingOmniTalker(nn.Module):
         abort_event: threading.Event | None = None,
         max_decode_steps: int | None = None,
     ):
-        with torch.cuda.stream(torch.cuda.Stream(self.device)):
+        runtime = self._get_device_runtime()
+        with runtime.stream_context(runtime.new_stream()):
             this_uuid = str(uuid.uuid1())
             token_queue = queue.Queue() if stream else None
             effective_abort_event = abort_event
@@ -977,8 +1093,7 @@ class MingOmniTalker(nn.Module):
                     yield {"tts_speech": this_tts_speech.cpu()}
                     completed = True
 
-                if torch.cuda.is_available():
-                    torch.cuda.current_stream().synchronize()
+                runtime.synchronize()
             finally:
                 if stream and not completed:
                     if effective_abort_event is not None:
@@ -998,7 +1113,7 @@ class MingOmniTalker(nn.Module):
         speech_parts = []
         spk_emb_list = []
         for x in prompt_wav_path:
-            speech_tmp, sample_rate = torchaudio.load(x, backend="soundfile")
+            speech_tmp, sample_rate = _load_local_audio(x)
             speech_tmp1 = speech_tmp.clone()
             if sample_rate != audio_detokenizer.config.sample_rate:
                 speech_tmp = torchaudio.transforms.Resample(
@@ -1385,7 +1500,8 @@ class MingOmniTalker(nn.Module):
                 "loaded voice presets) or prompt_wav_path. Both are None."
             )
 
-        with torch.cuda.stream(torch.cuda.Stream(self.device)):
+        runtime = self._get_device_runtime()
+        with runtime.stream_context(runtime.new_stream()):
             self.initial_graph()
 
             prompt_wav_lat, prompt_wav_emb, spk_emb = self.get_prompt_emb(
@@ -1429,7 +1545,8 @@ class MingOmniTalker(nn.Module):
         **kwargs,
     ):
         abort_event = kwargs.get("abort_event")
-        with torch.cuda.stream(torch.cuda.Stream(self.device)):
+        runtime = self._get_device_runtime()
+        with runtime.stream_context(runtime.new_stream()):
             self.initial_graph()
 
             prompt_wav_lat, prompt_wav_emb, spk_emb = self.get_prompt_emb(

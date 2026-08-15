@@ -42,6 +42,14 @@ def _thinker_factory_args(*, enable_streaming_tts: bool = False) -> dict[str, An
     return args
 
 
+def _talker_factory_args() -> dict[str, Any]:
+    return {
+        "device": current_platform.device_type,
+        "voice": "DB30",
+        "enable_cuda_graph": not current_platform.is_npu(),
+    }
+
+
 def _stage_by_name(stages: list[StageConfig], name: str) -> StageConfig | None:
     return next((stage for stage in stages if stage.name == name), None)
 
@@ -200,7 +208,7 @@ def _talker_stage(*, gpu: int, process: str) -> StageConfig:
         name=TALKER_STAGE,
         process=process,
         factory=f"{_PKG}.stages.create_talker_executor",
-        factory_args={"device": "cuda", "voice": "DB30"},
+        factory_args=_talker_factory_args(),
         gpu=gpu,
         terminal=True,
     )

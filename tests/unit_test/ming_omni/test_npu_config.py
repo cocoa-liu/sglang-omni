@@ -61,3 +61,25 @@ def test_npu_graph_policy_is_shared_by_streaming_thinker(monkeypatch) -> None:
     thinker = next(stage for stage in config.stages if stage.name == "thinker")
 
     assert thinker.factory_args["server_args_overrides"] == {"disable_cuda_graph": True}
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected_device", "expected_graph"),
+    [
+        (_FakePlatform("cuda"), "cuda", True),
+        (_FakePlatform("npu", npu=True), "npu", False),
+    ],
+)
+def test_non_streaming_talker_uses_platform_graph_policy(
+    monkeypatch,
+    platform: _FakePlatform,
+    expected_device: str,
+    expected_graph: bool,
+) -> None:
+    monkeypatch.setattr(ming_config, "current_platform", platform)
+
+    config = ming_config.MingOmniSpeechPipelineConfig(model_path="dummy")
+    talker = next(stage for stage in config.stages if stage.name == "talker")
+
+    assert talker.factory_args["device"] == expected_device
+    assert talker.factory_args["enable_cuda_graph"] is expected_graph
