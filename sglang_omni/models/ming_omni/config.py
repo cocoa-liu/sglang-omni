@@ -186,7 +186,7 @@ def _talker_stream_stage(*, gpu: int, process: str) -> StageConfig:
         name=TALKER_STREAM_STAGE,
         process=process,
         factory=f"{_PKG}.stages.create_streaming_talker_executor",
-        factory_args={"device": "cuda", "voice": "DB30"},
+        factory_args=_talker_factory_args(),
         gpu=gpu,
         terminal=True,
         can_accept_stream_before_payload=True,

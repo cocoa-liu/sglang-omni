@@ -362,6 +362,7 @@ def create_streaming_talker_executor(
     *,
     device: str = "cuda",
     voice: str = "DB30",
+    enable_cuda_graph: bool = True,
 ):
     """Factory for the streaming TTS talker stage.
 
@@ -379,6 +380,7 @@ def create_streaming_talker_executor(
         model_path=local_path,
         device=device,
         voice=voice,
+        enable_cuda_graph=enable_cuda_graph,
     )
 
 
