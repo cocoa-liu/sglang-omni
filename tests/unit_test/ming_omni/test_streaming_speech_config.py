@@ -62,6 +62,7 @@ def test_talker_stream_is_terminal_and_accepts_pre_payload_streams():
     talker = _stage(config, TALKER_STREAM_STAGE)
     assert talker.terminal is True
     assert talker.can_accept_stream_before_payload is True
+    assert isinstance(talker.factory_args["enable_cuda_graph"], bool)
 
 
 def test_streaming_speech_rejects_talker_gpu_in_thinker_tp_range():

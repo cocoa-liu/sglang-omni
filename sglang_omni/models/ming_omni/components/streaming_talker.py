@@ -62,6 +62,7 @@ class MingStreamingTalkerScheduler:
         *,
         device: str = "cuda",
         voice: str = DEFAULT_VOICE,
+        enable_cuda_graph: bool = True,
         talker: Any | None = None,
         audio_detokenizer: Any | None = None,
         sample_rate: int | None = None,
@@ -72,6 +73,7 @@ class MingStreamingTalkerScheduler:
         self._model_path = model_path
         self._device = device
         self._voice = voice
+        self._enable_cuda_graph = enable_cuda_graph
         self._talker = talker
         self._audio_detokenizer = audio_detokenizer
         self._sample_rate = sample_rate
@@ -426,7 +428,9 @@ class MingStreamingTalkerScheduler:
             self._device,
         )
         config = MingOmniTalkerConfig.from_pretrained_dir(talker_dir)
-        talker = MingOmniTalker(config)
+        if torch.device(self._device).type == "npu":
+            config.use_torch_attention()
+        talker = MingOmniTalker(config, enable_cuda_graph=self._enable_cuda_graph)
         talker.eval()
         weights = load_weights_by_prefix(talker_dir, prefix="")
         talker.load_weights(weights.items())
@@ -473,6 +477,10 @@ class MingStreamingTalkerScheduler:
         else:
             logger.warning("[TALKER_STREAM] AudioVAE missing at %s", vae_dir)
 
+        logger.info(
+            "[TALKER_STREAM] initializing execution path (cuda_graph=%s)",
+            self._enable_cuda_graph,
+        )
         talker.initial_graph()
         self._talker = talker
         self._audio_detokenizer = vae

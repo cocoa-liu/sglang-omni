@@ -14,6 +14,7 @@ import queue
 import re
 import threading
 import uuid
+from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
 from threading import Lock
@@ -1099,7 +1100,12 @@ class MingOmniTalker(nn.Module):
                     if effective_abort_event is not None:
                         effective_abort_event.set()
                     if future is not None:
-                        future.cancel()
+                        cancelled = future.cancel()
+                        if not cancelled:
+                            try:
+                                future.result()
+                            except (asyncio.CancelledError, FutureCancelledError):
+                                pass
                 with self.lock:
                     self.tts_speech_token_dict.pop(this_uuid, None)
                     self.llm_end_dict.pop(this_uuid, None)

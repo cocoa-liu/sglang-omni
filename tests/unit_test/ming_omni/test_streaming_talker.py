@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from typing import Any
@@ -68,7 +69,7 @@ def _drain(
     while time.monotonic() < deadline:
         try:
             msg = scheduler.outbox.get(timeout=0.2)
-        except Exception:
+        except queue.Empty:
             continue
         collected.append(msg)
         if msg.request_id == until_request_id and msg.type == "result":
@@ -204,3 +205,49 @@ def test_streaming_talker_abort_short_circuits_generation():
     results = [m for m in msgs if m.type == "result"]
     assert len(results) == 1
     assert results[0].data.data["aborted"] is True
+
+
+def test_streaming_talker_recovers_after_generation_error():
+    class _FlakyTalker(_FakeTalker):
+        def omni_audio_generation(self, **kwargs):
+            text = kwargs["tts_text"]
+            if text == "fail":
+                raise RuntimeError("injected streaming failure")
+            yield from super().omni_audio_generation(**kwargs)
+
+    talker = _FlakyTalker()
+    sched = _make_scheduler(talker=talker)
+    thread = _run(sched)
+    try:
+        failed_id = "req-fail"
+        sched.inbox.put(
+            IncomingMessage(
+                request_id=failed_id,
+                type="new_request",
+                data=StagePayload(request_id=failed_id, request=None, data={}),
+            )
+        )
+        _segment(sched, failed_id, "fail", segment_id=0, final=True)
+        error = sched.outbox.get(timeout=2.0)
+
+        recovered_id = "req-recovered"
+        sched.inbox.put(
+            IncomingMessage(
+                request_id=recovered_id,
+                type="new_request",
+                data=StagePayload(request_id=recovered_id, request=None, data={}),
+            )
+        )
+        _segment(sched, recovered_id, "recovered", segment_id=0, final=True)
+        sched.inbox.put(IncomingMessage(request_id=recovered_id, type="stream_done"))
+        recovered = _drain(sched, until_request_id=recovered_id)
+    finally:
+        sched.stop()
+        thread.join(timeout=1.0)
+
+    assert error.request_id == failed_id
+    assert error.type == "error"
+    assert isinstance(error.data, RuntimeError)
+    assert failed_id not in sched._states
+    assert len([message for message in recovered if message.type == "stream"]) == 2
+    assert recovered_id not in sched._states
