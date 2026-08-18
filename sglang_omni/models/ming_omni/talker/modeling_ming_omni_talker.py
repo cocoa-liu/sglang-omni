@@ -916,13 +916,19 @@ class MingOmniTalker(nn.Module):
                 ),
                 sil_cache,
             )
+        if last_chunk and sil_cache["buffer"]:
+            speech = torch.cat([speech, *sil_cache["buffer"]], dim=-1)
+            sil_cache["buffer"] = []
         non_sil_len = idx * frame_step + frame_size
         if last_chunk:
             non_sil_len += int(last_sil * sample_rate)
-        speech = torch.cat([*sil_cache["holder"], speech[..., :non_sil_len]], dim=-1)
+        current_speech = speech
+        current_output = current_speech[..., :non_sil_len]
+        current_tail = current_speech[..., non_sil_len:]
+        speech = torch.cat([*sil_cache["holder"], current_output], dim=-1)
         sil_cache["holder"] = []
-        if non_sil_len < speech.shape[-1]:
-            sil_cache["holder"].append(speech[..., non_sil_len:])
+        if current_tail.shape[-1] > 0:
+            sil_cache["holder"].append(current_tail)
         return speech, sil_cache
 
     def llm_job(

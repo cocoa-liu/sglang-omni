@@ -549,6 +549,59 @@ def test_tts_job_stream_applies_silence_holder(monkeypatch):
     assert talker.sil_holder_cache == {}
 
 
+def test_silence_holder_does_not_recache_emitted_audio():
+    import torch as _torch
+
+    sample_rate = 100
+    cache = None
+
+    first_input = _torch.cat([_torch.ones(10), _torch.zeros(20)]).unsqueeze(0)
+    first_output, cache = MingOmniTalker.silence_holder(
+        first_input, sample_rate, cache, last_chunk=False
+    )
+    assert _torch.equal(first_output, _torch.ones(1, 10))
+    assert len(cache["holder"]) == 1
+    assert _torch.equal(cache["holder"][0], _torch.zeros(1, 20))
+
+    second_input = _torch.full((1, 30), 2.0)
+    second_output, cache = MingOmniTalker.silence_holder(
+        second_input, sample_rate, cache, last_chunk=False
+    )
+    assert _torch.equal(
+        second_output,
+        _torch.cat([_torch.zeros(1, 20), second_input], dim=-1),
+    )
+    assert cache["holder"] == []
+
+    final_input = _torch.full((1, 10), 3.0)
+    final_output, cache = MingOmniTalker.silence_holder(
+        final_input, sample_rate, cache, last_chunk=True
+    )
+    assert _torch.equal(final_output, final_input)
+    assert cache["holder"] == []
+    assert cache["buffer"] == []
+
+    combined = _torch.cat([first_output, second_output, final_output], dim=-1)
+    expected = _torch.cat([first_input, second_input, final_input], dim=-1)
+    assert _torch.equal(combined, expected)
+
+
+def test_silence_holder_flushes_partial_final_frame():
+    import torch as _torch
+
+    final_input = _torch.arange(1, 16, dtype=_torch.float32).unsqueeze(0)
+    output, cache = MingOmniTalker.silence_holder(
+        final_input,
+        sample_rate=100,
+        sil_cache=None,
+        last_chunk=True,
+    )
+
+    assert _torch.equal(output, final_input)
+    assert cache["holder"] == []
+    assert cache["buffer"] == []
+
+
 def test_tts_job_abort_waits_for_worker_and_cleans_caches(monkeypatch):
     import asyncio as _asyncio
     import threading as _threading
