@@ -3,11 +3,18 @@
 
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn as nn
 from transformers.models.qwen3_omni_moe import modeling_qwen3_omni_moe as hf_modeling
 
-from sglang_omni.models.qwen3_omni.components.common import load_thinker_config
+from sglang_omni.models.qwen3_omni.components.common import (
+    assert_module_device,
+    assert_tensor_tree_device,
+    load_thinker_config,
+    resolve_component_device,
+)
 from sglang_omni.models.weight_loader import load_module, resolve_dtype
 from sglang_omni.utils import instantiate_module
 
@@ -45,10 +52,11 @@ class Qwen3OmniAudioEncoder(nn.Module):
         dtype: str | torch.dtype | None = None,
     ) -> None:
         super().__init__()
-        if device is None:
-            from sglang_omni.utils.device import get_device_type as _gdt
-
-            device = "cpu" if _gdt() == "npu" else "cuda"
+        device = resolve_component_device(
+            device=device,
+            gpu_id=None,
+            component="qwen3_omni_audio_encoder",
+        )
         torch_dtype = resolve_dtype(dtype)
         thinker_cfg = load_thinker_config(model_path)
         self._device = torch.device(device)
@@ -58,6 +66,12 @@ class Qwen3OmniAudioEncoder(nn.Module):
             torch_dtype=torch_dtype,
             device=device,
         )
+        assert_module_device(
+            self.audio_tower,
+            self._device,
+            component="qwen3_omni_audio_encoder",
+        )
+        self._forward_device_verified = False
         self._downsample_lengths = hf_modeling._get_feat_extract_output_lengths
 
     def forward(
@@ -80,12 +94,38 @@ class Qwen3OmniAudioEncoder(nn.Module):
             )
 
         audio_feature_lengths = audio_feature_lengths.to(self._device, dtype=torch.long)
-        outputs = self.audio_tower(
-            input_features.to(device=self._device, dtype=self.audio_tower.dtype),
-            feature_lens=audio_feature_lengths,
+        input_features = input_features.to(
+            device=self._device, dtype=self.audio_tower.dtype
         )
+        if not self._forward_device_verified:
+            assert_tensor_tree_device(
+                {
+                    "input_features": input_features,
+                    "audio_feature_lengths": audio_feature_lengths,
+                },
+                self._device,
+                component="qwen3_omni_audio_encoder",
+                boundary="forward_input",
+            )
+        outputs = self.audio_tower(input_features, feature_lens=audio_feature_lengths)
         audio_embeds = outputs.last_hidden_state
         audio_output_lengths = self._downsample_lengths(audio_feature_lengths)
+        if not self._forward_device_verified:
+            assert_tensor_tree_device(
+                {
+                    "audio_embeds": audio_embeds,
+                    "audio_output_lengths": audio_output_lengths,
+                },
+                self._device,
+                component="qwen3_omni_audio_encoder",
+                boundary="forward_output",
+            )
+            logging.getLogger(__name__).info(
+                "component_forward_device_verified component=%s device=%s",
+                "qwen3_omni_audio_encoder",
+                self._device,
+            )
+            self._forward_device_verified = True
         return {
             "audio_embeds": audio_embeds,
             "audio_feature_lengths": audio_feature_lengths,

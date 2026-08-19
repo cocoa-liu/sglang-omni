@@ -10,7 +10,12 @@ import torch
 import torch.nn as nn
 from transformers.models.qwen3_omni_moe import modeling_qwen3_omni_moe as hf_modeling
 
-from sglang_omni.models.qwen3_omni.components.common import load_thinker_config
+from sglang_omni.models.qwen3_omni.components.common import (
+    assert_module_device,
+    assert_tensor_tree_device,
+    load_thinker_config,
+    resolve_component_device,
+)
 from sglang_omni.models.weight_loader import load_module, resolve_dtype
 from sglang_omni.utils import instantiate_module
 
@@ -118,10 +123,11 @@ class Qwen3OmniImageEncoder(nn.Module):
         dtype: str | torch.dtype | None = None,
     ) -> None:
         super().__init__()
-        if device is None:
-            from sglang_omni.utils.device import get_device_type as _gdt
-
-            device = "cpu" if _gdt() == "npu" else "cuda"
+        device = resolve_component_device(
+            device=device,
+            gpu_id=None,
+            component="qwen3_omni_image_encoder",
+        )
         torch_dtype = resolve_dtype(dtype)
         thinker_cfg = load_thinker_config(model_path)
         vision_cfg = thinker_cfg.vision_config
@@ -132,6 +138,12 @@ class Qwen3OmniImageEncoder(nn.Module):
             torch_dtype=torch_dtype,
             device=device,
         )
+        assert_module_device(
+            self.visual,
+            self._device,
+            component="qwen3_omni_image_encoder",
+        )
+        self._forward_device_verified = False
         self.spatial_merge_size = int(vision_cfg.spatial_merge_size)
         self.out_hidden_size = int(vision_cfg.out_hidden_size)
         self.deepstack_layers = len(vision_cfg.deepstack_visual_indexes)
@@ -156,12 +168,35 @@ class Qwen3OmniImageEncoder(nn.Module):
         ):
             image_grid_thw = image_grid_thw.to(self._device, dtype=torch.long)
             pixel_values = pixel_values.to(device=self._device, dtype=self.visual.dtype)
+            if not self._forward_device_verified:
+                assert_tensor_tree_device(
+                    {"pixel_values": pixel_values, "image_grid_thw": image_grid_thw},
+                    self._device,
+                    component="qwen3_omni_image_encoder",
+                    boundary="forward_input",
+                )
             # Note:(Chenchen Hong) transformers 5.6's Qwen3OmniMoeVisionEncoder
             # returns BaseModelOutputWithDeepstackFeatures (pooler_output = merged
             # image embeds, deepstack_features = multiscale) instead of a 2-tuple.
             vision_outputs = self.visual(pixel_values, grid_thw=image_grid_thw)
             image_embeds = vision_outputs.pooler_output
             image_embeds_multiscale = vision_outputs.deepstack_features
+            if not self._forward_device_verified:
+                assert_tensor_tree_device(
+                    {
+                        "image_embeds": image_embeds,
+                        "deepstack_features": image_embeds_multiscale,
+                    },
+                    self._device,
+                    component="qwen3_omni_image_encoder",
+                    boundary="forward_output",
+                )
+                logger.info(
+                    "component_forward_device_verified component=%s device=%s",
+                    "qwen3_omni_image_encoder",
+                    self._device,
+                )
+                self._forward_device_verified = True
             image_token_counts = image_grid_thw.prod(-1) // merge
             outputs.update(
                 {
@@ -179,9 +214,35 @@ class Qwen3OmniImageEncoder(nn.Module):
             pixel_values_videos = pixel_values_videos.to(
                 device=self._device, dtype=self.visual.dtype
             )
+            if not self._forward_device_verified:
+                assert_tensor_tree_device(
+                    {
+                        "pixel_values_videos": pixel_values_videos,
+                        "video_grid_thw": video_grid_thw,
+                    },
+                    self._device,
+                    component="qwen3_omni_image_encoder",
+                    boundary="forward_input",
+                )
             video_outputs = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
             video_embeds = video_outputs.pooler_output
             video_embeds_multiscale = video_outputs.deepstack_features
+            if not self._forward_device_verified:
+                assert_tensor_tree_device(
+                    {
+                        "video_embeds": video_embeds,
+                        "deepstack_features": video_embeds_multiscale,
+                    },
+                    self._device,
+                    component="qwen3_omni_image_encoder",
+                    boundary="forward_output",
+                )
+                logger.info(
+                    "component_forward_device_verified component=%s device=%s",
+                    "qwen3_omni_image_encoder",
+                    self._device,
+                )
+                self._forward_device_verified = True
             video_token_counts = video_grid_thw.prod(-1) // merge
             outputs.update(
                 {

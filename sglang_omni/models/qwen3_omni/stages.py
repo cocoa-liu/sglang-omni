@@ -787,12 +787,18 @@ def create_image_encoder_executor(
     model_path: str,
     *,
     device: str | None = None,
+    gpu_id: int | None = None,
     dtype: str | None = None,
 ):
-    if device is None:
-        from sglang_omni.utils.device import get_device_string
+    from sglang_omni.models.qwen3_omni.components.common import (
+        resolve_component_device,
+    )
 
-        device = get_device_string(0)
+    device = resolve_component_device(
+        device=device,
+        gpu_id=gpu_id,
+        component="qwen3_omni_image_encoder",
+    )
 
     from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
@@ -864,12 +870,18 @@ def create_audio_encoder_executor(
     model_path: str,
     *,
     device: str | None = None,
+    gpu_id: int | None = None,
     dtype: str | None = None,
 ):
-    if device is None:
-        from sglang_omni.utils.device import get_device_string
+    from sglang_omni.models.qwen3_omni.components.common import (
+        resolve_component_device,
+    )
 
-        device = get_device_string(0)
+    device = resolve_component_device(
+        device=device,
+        gpu_id=gpu_id,
+        component="qwen3_omni_audio_encoder",
+    )
 
     from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 

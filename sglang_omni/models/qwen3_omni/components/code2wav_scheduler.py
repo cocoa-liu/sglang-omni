@@ -12,6 +12,11 @@ from typing import Any
 import numpy as np
 import torch
 
+from sglang_omni.models.qwen3_omni.components.common import (
+    assert_module_device,
+    assert_tensor_tree_device,
+    resolve_component_device,
+)
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.profiler.event_recorder import emit as _emit_event
 from sglang_omni.proto import StagePayload
@@ -25,11 +30,12 @@ logger = logging.getLogger(__name__)
 def load_code2wav_model(
     model_path: str, *, device: str | None = None, dtype: str | None = None
 ):
-    if device is None:
-        from sglang_omni.utils.device import get_device_type as _gdt
-
-        device = "cpu" if _gdt() == "npu" else "cuda"
     """Load Code2Wav model from HF checkpoint."""
+    device = resolve_component_device(
+        device=device,
+        gpu_id=None,
+        component="qwen3_omni_code2wav",
+    )
     from transformers import AutoConfig
 
     from sglang_omni.models.weight_loader import load_module, resolve_dtype
@@ -50,6 +56,11 @@ def load_code2wav_model(
         dtype=torch_dtype,
         device=device,
         strict=False,
+    )
+    assert_module_device(
+        model,
+        device,
+        component="qwen3_omni_code2wav",
     )
     return model
 
@@ -72,6 +83,7 @@ class Code2WavScheduler(StreamingSimpleScheduler):
         self._left_context_size = max(int(left_context_size), 0)
         self._sample_rate = sample_rate
         self._codec_eos_token_id = codec_eos_token_id
+        self._forward_device_verified = False
         self._total_upsample = int(model.total_upsample)
 
         # Per-request state
@@ -254,12 +266,32 @@ class Code2WavScheduler(StreamingSimpleScheduler):
         context = min(self._left_context_size, start)
         window = torch.stack(code_chunks[start - context : end], dim=0)
         codes = window.transpose(0, 1).unsqueeze(0)
+        if not self._forward_device_verified:
+            assert_tensor_tree_device(
+                codes,
+                self._device,
+                component="qwen3_omni_code2wav",
+                boundary="forward_input",
+            )
         with torch.no_grad():
             if self._device.type in ("cuda", "npu"):
                 from sglang_omni.utils.device import set_device
 
                 set_device(self._device)
             wav = self._model(codes)
+        if not self._forward_device_verified:
+            assert_tensor_tree_device(
+                wav,
+                self._device,
+                component="qwen3_omni_code2wav",
+                boundary="forward_output",
+            )
+            logger.info(
+                "component_forward_device_verified component=%s device=%s",
+                "qwen3_omni_code2wav",
+                self._device,
+            )
+            self._forward_device_verified = True
         trim = context * self._total_upsample
         if trim:
             wav = wav[..., trim:]
@@ -294,14 +326,11 @@ def create_code2wav_scheduler(
     left_context_size: int = 25,
 ):
     """Factory: returns Code2WavScheduler."""
-    if device is None:
-        from sglang_omni.utils.device import get_device_type as _gdt
-
-        device = "cpu" if _gdt() == "npu" else "cuda"
-    if gpu_id is not None:
-        from sglang_omni.utils.device import get_device_string
-
-        device = get_device_string(gpu_id)
+    device = resolve_component_device(
+        device=device,
+        gpu_id=gpu_id,
+        component="qwen3_omni_code2wav",
+    )
     model = load_code2wav_model(model_path, device=device, dtype=dtype)
     return Code2WavScheduler(
         model,
