@@ -32,6 +32,26 @@ from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from tests.unit_test.fixtures.qwen_fakes import FakeQwenTokenizer
 
 
+def test_code_predictor_forward_disables_autograd() -> None:
+    grad_enabled = []
+
+    class FakeTalker:
+        def _code_predictor_forward_incremental(self, **_kwargs):
+            grad_enabled.append(torch.is_grad_enabled())
+            value = torch.ones(1, requires_grad=True) * 2
+            return value, value
+
+    result_codes, summed_embeddings = Qwen3OmniTalker.code_predictor_forward(
+        FakeTalker(),
+        torch.zeros(1),
+        torch.zeros(1),
+    )
+
+    assert grad_enabled == [False]
+    assert result_codes.grad_fn is None
+    assert summed_embeddings.grad_fn is None
+
+
 def _sched_req(**data_kwargs: object) -> SimpleNamespace:
     return SimpleNamespace(data=SimpleNamespace(**data_kwargs))
 
