@@ -32,9 +32,20 @@ _PKG = "sglang_omni.models.ming_omni"
 
 
 def _thinker_server_args_overrides() -> dict[str, Any]:
-    """Return conservative platform defaults for the Ming thinker."""
+    """Return platform defaults for the Ming thinker.
+
+    Ming's custom multimodal prefill remains eager.  On NPU, capture only the
+    fixed-shape decode path and keep the bucket set bounded to the stage's
+    default maximum of 16 concurrent requests.  An explicit bucket list also
+    avoids SGLang's generic 64-GB-device heuristic, which would otherwise try
+    to capture substantially larger graphs than this pipeline can admit.
+    """
     if current_platform.is_npu():
-        return {"disable_cuda_graph": True}
+        return {
+            "cuda_graph_backend_decode": "full",
+            "cuda_graph_bs_decode": [1, 2, 4, 8, 16],
+            "cuda_graph_max_bs_decode": 16,
+        }
     return {}
 
 
@@ -52,7 +63,9 @@ def _talker_factory_args() -> dict[str, Any]:
     return {
         "device": current_platform.device_type,
         "voice": "DB30",
-        "enable_cuda_graph": not current_platform.is_npu(),
+        # Keep the public constructor argument for compatibility. Internally it
+        # now selects the graph implementation from the actual device module.
+        "enable_cuda_graph": current_platform.device_type in {"cuda", "npu"},
     }
 
 

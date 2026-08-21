@@ -26,7 +26,11 @@ class _FakePlatform:
         (
             _FakePlatform("npu", npu=True),
             "npu",
-            {"disable_cuda_graph": True},
+            {
+                "cuda_graph_backend_decode": "full",
+                "cuda_graph_bs_decode": [1, 2, 4, 8, 16],
+                "cuda_graph_max_bs_decode": 16,
+            },
         ),
     ],
 )
@@ -34,7 +38,7 @@ def test_text_pipeline_uses_platform_device_and_thinker_graph_policy(
     monkeypatch,
     platform: _FakePlatform,
     expected_device: str,
-    expected_overrides: dict[str, bool],
+    expected_overrides: dict[str, object],
 ) -> None:
     monkeypatch.setattr(ming_config, "current_platform", platform)
 
@@ -50,7 +54,7 @@ def test_text_pipeline_uses_platform_device_and_thinker_graph_policy(
         assert "server_args_overrides" not in thinker_args
 
 
-def test_npu_graph_policy_is_shared_by_streaming_thinker(monkeypatch) -> None:
+def test_npu_decode_graph_policy_is_shared_by_streaming_thinker(monkeypatch) -> None:
     monkeypatch.setattr(
         ming_config,
         "current_platform",
@@ -60,14 +64,18 @@ def test_npu_graph_policy_is_shared_by_streaming_thinker(monkeypatch) -> None:
     config = ming_config.MingOmniStreamingSpeechPipelineConfig(model_path="dummy")
     thinker = next(stage for stage in config.stages if stage.name == "thinker")
 
-    assert thinker.factory_args["server_args_overrides"] == {"disable_cuda_graph": True}
+    assert thinker.factory_args["server_args_overrides"] == {
+        "cuda_graph_backend_decode": "full",
+        "cuda_graph_bs_decode": [1, 2, 4, 8, 16],
+        "cuda_graph_max_bs_decode": 16,
+    }
 
 
 @pytest.mark.parametrize(
     ("platform", "expected_device", "expected_graph"),
     [
         (_FakePlatform("cuda"), "cuda", True),
-        (_FakePlatform("npu", npu=True), "npu", False),
+        (_FakePlatform("npu", npu=True), "npu", True),
     ],
 )
 def test_non_streaming_talker_uses_platform_graph_policy(
@@ -89,7 +97,7 @@ def test_non_streaming_talker_uses_platform_graph_policy(
     ("platform", "expected_device", "expected_graph"),
     [
         (_FakePlatform("cuda"), "cuda", True),
-        (_FakePlatform("npu", npu=True), "npu", False),
+        (_FakePlatform("npu", npu=True), "npu", True),
     ],
 )
 def test_streaming_talker_uses_platform_graph_policy(

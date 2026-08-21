@@ -141,6 +141,38 @@ def test_accelerator_device_runtime_delegates_stream_operations(monkeypatch) -> 
     ]
 
 
+def test_accelerator_device_runtime_delegates_graph_operations(monkeypatch) -> None:
+    events: list[object] = []
+    graph = object()
+
+    class _GraphContext:
+        def __enter__(self):
+            events.append("capture_enter")
+
+        def __exit__(self, *_args):
+            events.append("capture_exit")
+
+    module = SimpleNamespace(
+        NPUGraph=lambda: events.append("new_graph") or graph,
+        graph=lambda value, **kwargs: events.append(("graph", value, kwargs))
+        or _GraphContext(),
+    )
+    monkeypatch.setattr(torch, "get_device_module", lambda _device: module)
+
+    runtime = TalkerDeviceRuntime("npu:2")
+    created = runtime.new_graph()
+    with runtime.graph_context(created):
+        events.append("body")
+
+    assert events == [
+        "new_graph",
+        ("graph", graph, {"capture_error_mode": "thread_local"}),
+        "capture_enter",
+        "body",
+        "capture_exit",
+    ]
+
+
 def test_local_wav_loader_does_not_require_torchcodec(tmp_path: Path) -> None:
     path = tmp_path / "voice.wav"
     expected = torch.linspace(-0.5, 0.5, 1600).numpy()
