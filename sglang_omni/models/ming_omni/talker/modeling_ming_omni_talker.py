@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Ming-Omni talker model.
 
-The internal LLM backbone (dense Qwen2, hidden=896), with CUDA graph
+The internal LLM backbone (dense Qwen2, hidden=896), with device graph
 infrastructure, CFM/DiT/Aggregator modules and generation.
 """
 
@@ -182,7 +182,7 @@ class CFMGraphExecutor:
         if abort_event is not None and abort_event.is_set():
             raise asyncio.CancelledError()
         # Python abort checks inside CFM.sample run during capture; replay is
-        # bounded by explicit checks before and after the CUDA graph replay.
+        # bounded by explicit checks before and after the device graph replay.
         self.graph.replay()
         if abort_event is not None and abort_event.is_set():
             raise asyncio.CancelledError()
@@ -244,12 +244,13 @@ class CFMGraphExecutor:
         )
         self.sde_rnd_placeholder = torch.empty_like(sde_rnd)
 
-        # (wenyao) Aborting CFM.sample during torch.cuda.graph capture corrupts the
+        # Aborting CFM.sample during graph capture corrupts the
         # partial graph. Pass abort_event=None during capture; the caller
         # (execute) checks abort before _initialize_graph and on every replay.
-        self.graph = torch.cuda.CUDAGraph()
+        runtime = TalkerDeviceRuntime(input_tensor.device)
+        self.graph = runtime.new_graph()
         try:
-            with torch.cuda.graph(self.graph, capture_error_mode="thread_local"):
+            with runtime.graph_context(self.graph):
                 self.gen_lat_placeholder = self.cfm.sample(
                     self.last_hidden_state_placeholder,
                     self.his_lat_placeholder,
@@ -462,10 +463,10 @@ class MingOmniTalker(nn.Module):
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()
 
-    # ---- CUDA graph initialization ----
+    # ---- Device graph initialization ----
 
     def initial_graph(self, tokenizer=None):
-        """Initialize CUDA graphs for generation.
+        """Initialize accelerator graphs for generation.
 
         Args:
             tokenizer: If provided, sets the model tokenizer before graph init.
@@ -664,7 +665,8 @@ class MingOmniTalker(nn.Module):
                         )
                     else:
                         if model_graph is None:
-                            model_graph = torch.cuda.CUDAGraph()
+                            runtime = self._get_device_runtime()
+                            model_graph = runtime.new_graph()
                             inputs_embeds_placeholder = torch.empty_like(inputs_embeds)
                             cache_position_placeholder = torch.empty_like(
                                 cache_position
@@ -673,9 +675,7 @@ class MingOmniTalker(nn.Module):
                             inputs_embeds_placeholder.copy_(inputs_embeds)
                             cache_position_placeholder.copy_(cache_position)
 
-                            with torch.cuda.graph(
-                                model_graph, capture_error_mode="thread_local"
-                            ):
+                            with runtime.graph_context(model_graph):
                                 outputs_placeholder = self._model_decode_forward(
                                     inputs_embeds=inputs_embeds_placeholder,
                                     cache_position=cache_position_placeholder,
