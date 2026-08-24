@@ -89,7 +89,8 @@ class SpkembExtractor:
             self.campplus_session.run(
                 None,
                 {
-                    self.campplus_session.get_inputs()[0].name: feat.unsqueeze(dim=0)
+                    self.campplus_session.get_inputs()[0]
+                    .name: feat.unsqueeze(dim=0)
                     .cpu()
                     .numpy()
                 },
@@ -443,9 +444,9 @@ class MingOmniTalker(nn.Module):
             if param.numel() == 1 and loaded_weight.numel() == 1:
                 param.data.fill_(loaded_weight.item())
             else:
-                assert param.size() == loaded_weight.size(), (
-                    f"Shape mismatch for {name}: param={param.size()}, weight={loaded_weight.size()}"
-                )
+                assert (
+                    param.size() == loaded_weight.size()
+                ), f"Shape mismatch for {name}: param={param.size()}, weight={loaded_weight.size()}"
                 param.data.copy_(loaded_weight)
             loaded.add(name)
 
@@ -751,9 +752,9 @@ class MingOmniTalker(nn.Module):
         abort_event: threading.Event | None = None,
         max_decode_steps: int | None = None,
     ):
-        assert self.tokenizer is not None, (
-            "Tokenizer not set. Call set_tokenizer() first."
-        )
+        assert (
+            self.tokenizer is not None
+        ), "Tokenizer not set. Call set_tokenizer() first."
         tokenizer = self.tokenizer
 
         spk_emb_prompt: list = []
