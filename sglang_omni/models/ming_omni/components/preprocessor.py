@@ -256,7 +256,6 @@ class MingPreprocessor:
         # Lazy-init vision processors
         self._image_processor = None
         self._video_processor = None
-        self._video_processor_is_dedicated = False
 
     def _get_image_processor(self):
         """Lazy-init Qwen2VLImageProcessor (same processor as Ming-Omni uses)."""
@@ -274,25 +273,18 @@ class MingPreprocessor:
         return self._image_processor
 
     def _get_video_processor(self):
-        """Lazy-init the video processor supported by the Transformers version."""
+        """Lazy-init the video processor from the pinned Transformers version."""
         if self._video_processor is None:
-            try:
-                from transformers import Qwen2VLVideoProcessor
-            except ImportError:
-                # Older Transformers versions accepted ``videos`` directly in
-                # Qwen2VLImageProcessor.preprocess.
-                self._video_processor = self._get_image_processor()
-                self._video_processor_is_dedicated = False
-            else:
-                vc = self._vision_config
-                self._video_processor = Qwen2VLVideoProcessor(
-                    min_pixels=256 * 28 * 28,
-                    max_pixels=1280 * 28 * 28,
-                    patch_size=vc.patch_size,
-                    temporal_patch_size=vc.temporal_patch_size,
-                    merge_size=vc.spatial_merge_size,
-                )
-                self._video_processor_is_dedicated = True
+            from transformers import Qwen2VLVideoProcessor
+
+            vc = self._vision_config
+            self._video_processor = Qwen2VLVideoProcessor(
+                min_pixels=256 * 28 * 28,
+                max_pixels=1280 * 28 * 28,
+                patch_size=vc.patch_size,
+                temporal_patch_size=vc.temporal_patch_size,
+                merge_size=vc.spatial_merge_size,
+            )
         return self._video_processor
 
     def _process_images(
@@ -344,14 +336,7 @@ class MingPreprocessor:
             if arr.ndim == 4 and arr.shape[1] in (1, 3):
                 arr = np.transpose(arr, (0, 2, 3, 1))
             np_videos.append(arr)
-        if self._video_processor_is_dedicated:
-            result = processor.preprocess(np_videos, return_tensors="pt")
-        else:
-            # Older Qwen2VLImageProcessor versions require ``images`` as a
-            # positional argument and accept videos as a keyword.
-            result = processor.preprocess(
-                images=None, videos=np_videos, return_tensors="pt"
-            )
+        result = processor.preprocess(np_videos, return_tensors="pt")
         pixel_values_videos = result["pixel_values_videos"]
         video_grid_thw = result["video_grid_thw"]
         token_counts = _estimate_image_tokens(

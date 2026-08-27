@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,74 +14,75 @@ from sglang_omni.models.ming_omni.talker.configuration_bailing_talker import (
 )
 from sglang_omni.models.ming_omni.talker.device_runtime import TalkerDeviceRuntime
 from sglang_omni.models.ming_omni.talker.modeling_ming_omni_talker import (
+    CFMGraphExecutor,
+    MingOmniTalker,
     _load_local_audio,
 )
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_TALKER_SOURCE = (
-    _REPO_ROOT
-    / "sglang_omni"
-    / "models"
-    / "ming_omni"
-    / "talker"
-    / "modeling_ming_omni_talker.py"
-)
 
+def test_cfm_eager_path_executes_model_components() -> None:
+    calls: dict[str, object] = {}
 
-def _class_node(tree: ast.Module, name: str) -> ast.ClassDef:
-    return next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == name
+    class _CFM:
+        def sample(self, *args, abort_event=None):
+            calls["sample"] = (args, abort_event)
+            return args[2] + 1
+
+    def aggregator(latents):
+        calls["aggregator"] = latents
+        return latents + 2
+
+    def stop_head(hidden):
+        calls["stop_head"] = hidden
+        return torch.tensor([[0.0, 1.0]], dtype=hidden.dtype)
+
+    executor = CFMGraphExecutor(
+        SimpleNamespace(patch_size=2, steps=3),
+        _CFM(),
+        aggregator,
+        stop_head,
+        enable_cuda_graph=False,
     )
+    input_tensor = torch.randn(1, 1, 4)
+    his_lat = torch.randn(1, 2, 4)
 
-
-def _method_node(class_node: ast.ClassDef, name: str) -> ast.FunctionDef:
-    return next(
-        node
-        for node in class_node.body
-        if isinstance(node, ast.FunctionDef) and node.name == name
-    )
-
-
-def test_cfm_eager_path_is_separate_from_cuda_graph_apis() -> None:
-    tree = ast.parse(_TALKER_SOURCE.read_text())
-    executor = _class_node(tree, "CFMGraphExecutor")
-    eager = _method_node(executor, "_execute_eager")
-
-    attributes = [
-        node.attr for node in ast.walk(eager) if isinstance(node, ast.Attribute)
-    ]
-    calls = [
-        node.func.attr
-        for node in ast.walk(eager)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-    ]
+    gen_lat, inputs_embeds, stop_out = executor.execute(input_tensor, his_lat)
 
     assert "sample" in calls
-    assert "softmax" in calls
-    assert "cuda" not in attributes
-    assert "CUDAGraph" not in attributes
+    assert calls["aggregator"] is gen_lat
+    torch.testing.assert_close(inputs_embeds, gen_lat + 2)
+    torch.testing.assert_close(stop_out.sum(dim=-1), torch.ones(1))
+    torch.testing.assert_close(calls["stop_head"], input_tensor[:, -1, :])
+    assert executor.initialized is False
 
 
-def test_decode_eager_path_updates_the_supplied_kv_cache() -> None:
-    tree = ast.parse(_TALKER_SOURCE.read_text())
-    talker = _class_node(tree, "MingOmniTalker")
-    decode = _method_node(talker, "_model_decode_forward")
-    source = ast.unparse(decode)
+def test_decode_forward_passes_cache_to_model() -> None:
+    calls: dict[str, object] = {}
+    expected = object()
 
-    assert "past_key_values=past_key_values" in source
-    assert "use_cache=True" in source
-    assert "torch.cuda" not in source
+    class _Model:
+        def __call__(self, **kwargs):
+            calls.update(kwargs)
+            return expected
 
+    talker = SimpleNamespace(model=_Model())
+    embeddings = torch.randn(1, 1, 4)
+    cache_position = torch.tensor([3])
+    cache = object()
 
-def test_generate_normalizes_tensor_cache_length_before_arange() -> None:
-    tree = ast.parse(_TALKER_SOURCE.read_text())
-    talker = _class_node(tree, "MingOmniTalker")
-    generate = _method_node(talker, "generate")
-    source = ast.unparse(generate)
+    result = MingOmniTalker._model_decode_forward(
+        talker,
+        inputs_embeds=embeddings,
+        cache_position=cache_position,
+        past_key_values=cache,
+    )
 
-    assert "past_seen_tokens = int(past_seen_tokens.item())" in source
+    assert result is expected
+    assert calls["inputs_embeds"] is embeddings
+    assert calls["cache_position"] is cache_position
+    assert calls["past_key_values"] is cache
+    assert calls["use_cache"] is True
+    assert calls["output_hidden_states"] is True
 
 
 def test_use_torch_attention_overrides_both_talker_backends() -> None:

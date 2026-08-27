@@ -905,7 +905,6 @@ def test_ming_preprocessor_uses_dedicated_video_processor_contract() -> None:
 
     preprocessor = MingPreprocessor.__new__(MingPreprocessor)
     preprocessor._video_processor = FakeVideoProcessor()
-    preprocessor._video_processor_is_dedicated = True
     preprocessor._vision_config = SimpleNamespace(spatial_merge_size=2)
 
     frames = torch.zeros((4, 3, 8, 8), dtype=torch.float32)

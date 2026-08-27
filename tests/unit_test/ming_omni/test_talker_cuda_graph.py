@@ -1,43 +1,57 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Ming talker device graph source-level regression tests."""
+"""Behavior tests for Ming talker graph capture."""
 
 from __future__ import annotations
 
-import ast
-from pathlib import Path
+from contextlib import contextmanager
+from types import SimpleNamespace
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_TALKER_SOURCE = (
-    _REPO_ROOT
-    / "sglang_omni"
-    / "models"
-    / "ming_omni"
-    / "talker"
-    / "modeling_ming_omni_talker.py"
+import torch
+
+from sglang_omni.models.ming_omni.talker import (
+    modeling_ming_omni_talker as talker_model,
 )
 
 
-def _method_node(
-    tree: ast.Module, class_name: str, method_name: str
-) -> ast.FunctionDef:
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef) and node.name == class_name:
-            for item in node.body:
-                if isinstance(item, ast.FunctionDef) and item.name == method_name:
-                    return item
-    raise AssertionError(f"{class_name}.{method_name} not found")
+def test_cfm_graph_capture_uses_device_runtime(monkeypatch) -> None:
+    events: list[object] = []
+    graph = object()
 
+    class _Runtime:
+        def __init__(self, device):
+            events.append(("runtime", device))
 
-def test_ming_lazy_graph_captures_use_device_runtime() -> None:
-    tree = ast.parse(_TALKER_SOURCE.read_text())
-    methods = [
-        ("CFMGraphExecutor", "_initialize_graph"),
-        ("MingOmniTalker", "generate"),
+        def new_graph(self):
+            events.append("new_graph")
+            return graph
+
+        @contextmanager
+        def graph_context(self, captured_graph):
+            events.append(("capture", captured_graph))
+            yield
+
+    class _CFM:
+        def sample(self, _hidden, _history, noise, *_args, **_kwargs):
+            return noise + 1
+
+    monkeypatch.setattr(talker_model, "TalkerDeviceRuntime", _Runtime)
+    executor = talker_model.CFMGraphExecutor(
+        SimpleNamespace(steps=2, patch_size=2),
+        _CFM(),
+        lambda latents: latents + 2,
+        lambda hidden: torch.stack((hidden[:, 0], hidden[:, 0] + 1), dim=-1),
+    )
+    input_tensor = torch.randn(1, 1, 4)
+    history = torch.randn(1, 2, 4)
+    noise = torch.randn(1, 2, 4)
+    sde_noise = torch.randn(2, 1, 2, 4)
+
+    executor._initialize_graph(input_tensor, history, noise, sde_noise)
+
+    assert executor.initialized is True
+    assert executor.graph is graph
+    assert events == [
+        ("runtime", input_tensor.device),
+        "new_graph",
+        ("capture", graph),
     ]
-
-    for class_name, method_name in methods:
-        method = _method_node(tree, class_name, method_name)
-        source = ast.unparse(method)
-        assert ".new_graph()" in source
-        assert ".graph_context(" in source
-        assert "torch.cuda" not in source

@@ -72,44 +72,30 @@ def test_npu_decode_graph_policy_is_shared_by_streaming_thinker(monkeypatch) -> 
 
 
 @pytest.mark.parametrize(
-    ("platform", "expected_device", "expected_graph"),
+    ("config_cls", "stage_name"),
     [
-        (_FakePlatform("cuda"), "cuda", True),
-        (_FakePlatform("npu", npu=True), "npu", True),
+        (ming_config.MingOmniSpeechPipelineConfig, "talker"),
+        (ming_config.MingOmniStreamingSpeechPipelineConfig, "talker_stream"),
     ],
 )
-def test_non_streaming_talker_uses_platform_graph_policy(
-    monkeypatch,
-    platform: _FakePlatform,
-    expected_device: str,
-    expected_graph: bool,
-) -> None:
-    monkeypatch.setattr(ming_config, "current_platform", platform)
-
-    config = ming_config.MingOmniSpeechPipelineConfig(model_path="dummy")
-    talker = next(stage for stage in config.stages if stage.name == "talker")
-
-    assert talker.factory_args["device"] == expected_device
-    assert talker.factory_args["enable_cuda_graph"] is expected_graph
-
-
 @pytest.mark.parametrize(
-    ("platform", "expected_device", "expected_graph"),
+    ("platform", "expected_device"),
     [
-        (_FakePlatform("cuda"), "cuda", True),
-        (_FakePlatform("npu", npu=True), "npu", True),
+        (_FakePlatform("cuda"), "cuda"),
+        (_FakePlatform("npu", npu=True), "npu"),
     ],
 )
-def test_streaming_talker_uses_platform_graph_policy(
+def test_talker_uses_platform_device_and_graph_policy(
     monkeypatch,
+    config_cls,
+    stage_name: str,
     platform: _FakePlatform,
     expected_device: str,
-    expected_graph: bool,
 ) -> None:
     monkeypatch.setattr(ming_config, "current_platform", platform)
 
-    config = ming_config.MingOmniStreamingSpeechPipelineConfig(model_path="dummy")
-    talker = next(stage for stage in config.stages if stage.name == "talker_stream")
+    config = config_cls(model_path="dummy")
+    talker = next(stage for stage in config.stages if stage.name == stage_name)
 
     assert talker.factory_args["device"] == expected_device
-    assert talker.factory_args["enable_cuda_graph"] is expected_graph
+    assert talker.factory_args["enable_cuda_graph"] is True

@@ -25,11 +25,6 @@ from sglang_omni.platforms import current_platform
 logger = logging.getLogger(__name__)
 
 
-def _distributed_backend() -> str:
-    """Resolve the image encoder TP backend through the platform contract."""
-    return current_platform.get_torch_distributed_backend_str()
-
-
 def _iter_weights_by_prefix(model_dir: Path, prefix: str):
     """Iterate checkpoint weights with given prefix, stripping it."""
     from safetensors import safe_open
@@ -177,7 +172,7 @@ class MingImageEncoder(nn.Module):
 
         if not parallel_state.model_parallel_is_initialized():
             parallel_state.init_distributed_environment(
-                backend=_distributed_backend(),
+                backend=current_platform.get_torch_distributed_backend_str(),
                 world_size=tp_size,
                 rank=tp_rank,
                 local_rank=0,
