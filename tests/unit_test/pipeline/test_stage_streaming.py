@@ -784,30 +784,6 @@ def test_stage_routes_relay_stream_chunk_to_scheduler() -> None:
     asyncio.run(_run())
 
 
-def test_shm_stream_transport_preserves_empty_tensor() -> None:
-    async def _run() -> None:
-        relay = ShmRelay(engine_id="empty-stream", device="cpu")
-        expected = torch.empty((0,), dtype=torch.uint8)
-        data_ref, _ = await stage_io.write_tensor(
-            relay,
-            "req:empty",
-            expected,
-            transport=TransportKind.SHM,
-            kind=DataKind.STREAM_CHUNK,
-            request_id="req",
-            from_stage="segmenter",
-            to_stage="talker_stream",
-        )
-
-        actual = await stage_io.read_tensor(relay, data_ref)
-
-        assert actual.shape == expected.shape
-        assert actual.dtype == expected.dtype
-        assert actual.numel() == 0
-
-    asyncio.run(_run())
-
-
 def test_stage_drops_payload_after_abort_during_relay_read() -> None:
     async def _run() -> None:
         control_plane = _FakeControlPlane()

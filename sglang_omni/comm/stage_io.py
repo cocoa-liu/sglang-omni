@@ -374,11 +374,7 @@ async def write_tensor(
     target_device = torch.device(relay_device(relay))
     if packed.device != target_device:
         packed = packed.to(device=target_device)
-    alignment = _dtype_alignment(tensor.dtype)
-    # Relay backends such as multiprocessing.shared_memory cannot allocate a
-    # zero-byte block. Preserve the logical empty shape while transporting one
-    # aligned padding region; read_tensor slices it away via DataRef.offset.
-    offset = alignment if packed.numel() == 0 else _pad_offset(0, alignment)
+    offset = _pad_offset(0, _dtype_alignment(tensor.dtype))
     if offset:
         packed = torch.cat(
             [torch.zeros(offset, dtype=torch.uint8, device=target_device), packed]
