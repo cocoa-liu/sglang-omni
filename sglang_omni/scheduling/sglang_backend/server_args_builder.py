@@ -43,7 +43,6 @@ def build_sglang_server_args(
     max_prefill_tokens: int = 16384,
     max_running_requests: int = 16,
     mem_fraction_static: float | None = None,
-    cap_decode_cuda_graph_to_max_running_requests: bool = False,
     **overrides: Any,
 ) -> ServerArgs:
     """Build ServerArgs with shared defaults for all SGLang AR engines."""
@@ -62,8 +61,6 @@ def build_sglang_server_args(
         kwargs["mem_fraction_static"] = mem_fraction_static
     kwargs.update(overrides)
     _normalize_decode_cuda_graph_overrides(kwargs)
-    if cap_decode_cuda_graph_to_max_running_requests:
-        kwargs.setdefault("cuda_graph_max_bs_decode", max_running_requests)
     # Existing Omni models remain eager-prefill by default. Models that have
     # adapted SGLang's phase-specific prefill contract opt in explicitly
     # through their generation defaults / server overrides.

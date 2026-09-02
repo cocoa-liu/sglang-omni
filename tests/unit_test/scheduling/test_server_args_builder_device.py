@@ -45,26 +45,6 @@ def test_caller_resolved_device_is_not_overwritten(monkeypatch) -> None:
     assert _build(monkeypatch, device="cpu")["device"] == "cpu"
 
 
-def test_decode_graph_cap_uses_final_concurrency_without_overriding_user(
-    monkeypatch,
-) -> None:
-    derived = _build(
-        monkeypatch,
-        max_running_requests=7,
-        cap_decode_cuda_graph_to_max_running_requests=True,
-    )
-    explicit = _build(
-        monkeypatch,
-        max_running_requests=7,
-        cap_decode_cuda_graph_to_max_running_requests=True,
-        cuda_graph_max_bs_decode=5,
-    )
-
-    assert derived["cuda_graph_max_bs_decode"] == 7
-    assert "cuda_graph_bs_decode" not in derived
-    assert explicit["cuda_graph_max_bs_decode"] == 5
-
-
 def _drive_build(monkeypatch, *, overrides, gpu_id=0):
     """Run SGLangGenerationEngineBuilder.build() far enough to reach the device
     reconciliation, then stop. Returns the device handed to SGLang.
