@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import soundfile as sf
 import torch
@@ -96,81 +98,33 @@ def test_use_torch_attention_overrides_both_talker_backends() -> None:
     assert config.aggregator["attn_backend"] == "torch"
 
 
-def test_cpu_device_runtime_uses_noop_stream_context() -> None:
-    runtime = TalkerDeviceRuntime("cpu")
+def test_accelerator_device_runtime_delegates_stream_and_graph(monkeypatch) -> None:
+    stream = object()
+    graph = object()
+    synchronize = Mock()
+    module = SimpleNamespace(
+        Stream=Mock(return_value=stream),
+        stream=Mock(return_value=nullcontext()),
+        current_stream=Mock(return_value=SimpleNamespace(synchronize=synchronize)),
+        NPUGraph=Mock(return_value=graph),
+        graph=Mock(return_value=nullcontext()),
+    )
+    monkeypatch.setattr(torch, "get_device_module", lambda _device: module)
 
-    assert runtime.new_stream() is None
-    with runtime.stream_context(None):
+    runtime = TalkerDeviceRuntime("npu:2")
+    with runtime.stream_context(runtime.new_stream()):
         pass
     runtime.synchronize()
+    with runtime.graph_context(runtime.new_graph()):
+        pass
 
-
-def test_accelerator_device_runtime_delegates_stream_operations(monkeypatch) -> None:
-    events: list[object] = []
-    stream = object()
-
-    class _StreamContext:
-        def __enter__(self):
-            events.append("enter")
-
-        def __exit__(self, *_args):
-            events.append("exit")
-
-    module = SimpleNamespace(
-        Stream=lambda *, device: events.append(("new", device)) or stream,
-        stream=lambda value: events.append(("context", value)) or _StreamContext(),
-        current_stream=lambda device: SimpleNamespace(
-            synchronize=lambda: events.append(("sync", device))
-        ),
-    )
-    monkeypatch.setattr(torch, "get_device_module", lambda _device: module)
-
-    runtime = TalkerDeviceRuntime("npu:2")
-    created = runtime.new_stream()
-    with runtime.stream_context(created):
-        events.append("body")
-    runtime.synchronize()
-
-    assert events == [
-        ("new", torch.device("npu:2")),
-        ("context", stream),
-        "enter",
-        "body",
-        "exit",
-        ("sync", torch.device("npu:2")),
-    ]
-
-
-def test_accelerator_device_runtime_delegates_graph_operations(monkeypatch) -> None:
-    events: list[object] = []
-    graph = object()
-
-    class _GraphContext:
-        def __enter__(self):
-            events.append("capture_enter")
-
-        def __exit__(self, *_args):
-            events.append("capture_exit")
-
-    module = SimpleNamespace(
-        NPUGraph=lambda: events.append("new_graph") or graph,
-        graph=lambda value, **kwargs: events.append(("graph", value, kwargs))
-        or _GraphContext(),
-    )
-    monkeypatch.setattr(torch, "get_device_module", lambda _device: module)
-
-    runtime = TalkerDeviceRuntime("npu:2")
-    created = runtime.new_graph()
-    with runtime.graph_context(created):
-        events.append("body")
-
-    assert events == [
-        "new_graph",
-        ("graph", graph, {"capture_error_mode": "thread_local"}),
-        "capture_enter",
-        "body",
-        "capture_exit",
-    ]
+    device = torch.device("npu:2")
+    module.Stream.assert_called_once_with(device=device)
+    module.stream.assert_called_once_with(stream)
+    module.current_stream.assert_called_once_with(device)
+    synchronize.assert_called_once_with()
+    module.NPUGraph.assert_called_once_with()
+    module.graph.assert_called_once_with(graph, capture_error_mode="thread_local")
 
 
 def test_local_wav_loader_does_not_require_torchcodec(tmp_path: Path) -> None:

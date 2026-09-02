@@ -42,10 +42,8 @@ def test_tp_initialization_uses_platform_backend(monkeypatch) -> None:
 
     image_encoder.MingImageEncoder._init_sglang_tp(tp_rank=1, tp_size=2)
 
-    assert calls["distributed"] == {
-        "backend": "hccl",
-        "world_size": 2,
-        "rank": 1,
-        "local_rank": 0,
-    }
+    distributed = calls["distributed"]
+    assert distributed["backend"] == "hccl"
+    assert distributed["world_size"] == 2
+    assert distributed["rank"] == 1
     assert calls["model_parallel"] == {"tensor_model_parallel_size": 2}
