@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -24,21 +25,14 @@ def test_autocast_context_uses_tensor_device(
     device_type: str,
     expected_enabled: bool,
 ) -> None:
-    captured: dict[str, object] = {}
-    sentinel = object()
-
-    def fake_autocast(**kwargs):
-        captured.update(kwargs)
-        return sentinel
-
-    monkeypatch.setattr(torch, "autocast", fake_autocast)
+    autocast = Mock()
+    monkeypatch.setattr(torch, "autocast", autocast)
     tensor = SimpleNamespace(device=SimpleNamespace(type=device_type))
 
-    result = audio_encoder._autocast_context(tensor)
+    audio_encoder._autocast_context(tensor)
 
-    assert result is sentinel
-    assert captured == {
-        "device_type": device_type,
-        "dtype": torch.bfloat16,
-        "enabled": expected_enabled,
-    }
+    autocast.assert_called_once_with(
+        device_type=device_type,
+        dtype=torch.bfloat16,
+        enabled=expected_enabled,
+    )
