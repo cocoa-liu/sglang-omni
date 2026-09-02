@@ -12,6 +12,7 @@ from typing import Any
 from sglang_omni.models.ming_omni.io import MingOmniPipelineState
 from sglang_omni.models.ming_omni.pipeline.next_stage import AUDIO_STAGE, IMAGE_STAGE
 from sglang_omni.models.ming_omni.tp_utils import validate_stage_tp_support
+from sglang_omni.platforms import current_platform
 from sglang_omni.proto import StagePayload
 
 
@@ -307,6 +308,7 @@ def create_sglang_thinker_executor_from_config(
     server_args = build_sglang_server_args(
         model_path,
         context_length=thinker_max_seq_len,
+        cap_decode_cuda_graph_to_max_running_requests=current_platform.is_npu(),
         **overrides,
     )
     return create_thinker_scheduler(
