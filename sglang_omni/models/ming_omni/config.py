@@ -35,8 +35,8 @@ def _thinker_server_args_overrides() -> dict[str, Any]:
     """Return platform defaults for the Ming thinker.
 
     Ming's custom multimodal prefill remains eager. On NPU, capture only the
-    fixed-shape decode path. The graph cap is derived later, after the final
-    request concurrency has been resolved.
+    fixed-shape decode path. SGLang owns the graph cap, bucket generation, and
+    final request-pool clamping.
     """
     if current_platform.is_npu():
         return {"cuda_graph_backend_decode": "full"}

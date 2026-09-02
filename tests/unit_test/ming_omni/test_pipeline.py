@@ -693,12 +693,6 @@ def test_ming_thinker_factory_registers_hf_config_before_server_args(
 ) -> None:
     from sglang_omni.models.ming_omni import stages
 
-    monkeypatch.setattr(
-        stages,
-        "current_platform",
-        SimpleNamespace(is_npu=lambda: True),
-    )
-
     call_order: list[str] = []
     captured_server_args_kwargs: dict[str, object] = {}
 
@@ -744,21 +738,11 @@ def test_ming_thinker_factory_registers_hf_config_before_server_args(
         bootstrap_module,
     )
 
-    stages.create_sglang_thinker_executor_from_config(
-        model_path="dummy",
-        server_args_overrides={"max_running_requests": 7},
-    )
+    stages.create_sglang_thinker_executor_from_config(model_path="dummy")
 
     assert call_order == ["register", "build_server_args", "create_scheduler"]
     assert captured_server_args_kwargs["trust_remote_code"] is False
     assert captured_server_args_kwargs["sampling_backend"] == "pytorch"
-    assert captured_server_args_kwargs["max_running_requests"] == 7
-    assert (
-        captured_server_args_kwargs[
-            "cap_decode_cuda_graph_to_max_running_requests"
-        ]
-        is True
-    )
 
 
 def test_ming_arch_override_uses_composite_llm_config() -> None:
