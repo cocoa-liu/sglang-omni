@@ -4,11 +4,9 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-import soundfile as sf
 import torch
 
 from sglang_omni.models.ming_omni.talker.configuration_bailing_talker import (
@@ -18,7 +16,6 @@ from sglang_omni.models.ming_omni.talker.device_runtime import TalkerDeviceRunti
 from sglang_omni.models.ming_omni.talker.modeling_ming_omni_talker import (
     CFMGraphExecutor,
     MingOmniTalker,
-    _load_local_audio,
 )
 
 
@@ -125,15 +122,3 @@ def test_accelerator_device_runtime_delegates_stream_and_graph(monkeypatch) -> N
     synchronize.assert_called_once_with()
     module.NPUGraph.assert_called_once_with()
     module.graph.assert_called_once_with(graph, capture_error_mode="thread_local")
-
-
-def test_local_wav_loader_does_not_require_torchcodec(tmp_path: Path) -> None:
-    path = tmp_path / "voice.wav"
-    expected = torch.linspace(-0.5, 0.5, 1600).numpy()
-    sf.write(path, expected, 16000, subtype="FLOAT")
-
-    waveform, sample_rate = _load_local_audio(str(path))
-
-    assert sample_rate == 16000
-    assert waveform.shape == (1, 1600)
-    torch.testing.assert_close(waveform[0], torch.from_numpy(expected))

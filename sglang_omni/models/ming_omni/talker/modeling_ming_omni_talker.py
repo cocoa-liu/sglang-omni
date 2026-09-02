@@ -41,14 +41,6 @@ logger = logging.getLogger(__name__)
 _TOKEN_DONE = object()
 
 
-def _load_local_audio(path: str) -> tuple[torch.Tensor, int]:
-    """Load a local waveform without requiring TorchCodec CUDA libraries."""
-    import soundfile as sf
-
-    waveform, sample_rate = sf.read(path, dtype="float32", always_2d=True)
-    return torch.from_numpy(waveform.T).contiguous(), sample_rate
-
-
 # ---------- Optional: onnxruntime for speaker embedding ----------
 try:
     import onnxruntime
@@ -1126,7 +1118,7 @@ class MingOmniTalker(nn.Module):
         speech_parts = []
         spk_emb_list = []
         for x in prompt_wav_path:
-            speech_tmp, sample_rate = _load_local_audio(x)
+            speech_tmp, sample_rate = torchaudio.load(x, backend="soundfile")
             speech_tmp1 = speech_tmp.clone()
             if sample_rate != audio_detokenizer.config.sample_rate:
                 speech_tmp = torchaudio.transforms.Resample(
