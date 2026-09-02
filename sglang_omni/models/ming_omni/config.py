@@ -31,37 +31,26 @@ from sglang_omni.platforms import current_platform
 _PKG = "sglang_omni.models.ming_omni"
 
 
-def _thinker_server_args_overrides(
-    *, max_running_requests: int
-) -> dict[str, Any]:
+def _thinker_server_args_overrides() -> dict[str, Any]:
     """Return platform defaults for the Ming thinker.
 
-    Ming's custom multimodal prefill remains eager.  On NPU, capture only the
-    fixed-shape decode path and cap graph capture at the configured request
-    concurrency. SGLang derives the concrete batch buckets from that cap.
+    Ming's custom multimodal prefill remains eager. On NPU, capture only the
+    fixed-shape decode path. The graph cap is derived later, after the final
+    request concurrency has been resolved.
     """
-    overrides: dict[str, Any] = {
-        "max_running_requests": max_running_requests,
-    }
     if current_platform.is_npu():
-        overrides.update(
-            {
-                "cuda_graph_backend_decode": "full",
-                "cuda_graph_max_bs_decode": max_running_requests,
-            }
-        )
-    return overrides
+        return {"cuda_graph_backend_decode": "full"}
+    return {}
 
 
 def _thinker_factory_args(
     *,
     enable_streaming_tts: bool = False,
-    max_running_requests: int = 16,
 ) -> dict[str, Any]:
     args: dict[str, Any] = {"thinker_max_seq_len": 8192}
-    args["server_args_overrides"] = _thinker_server_args_overrides(
-        max_running_requests=max_running_requests
-    )
+    overrides = _thinker_server_args_overrides()
+    if overrides:
+        args["server_args_overrides"] = overrides
     if enable_streaming_tts:
         args["enable_streaming_tts"] = True
     return args
