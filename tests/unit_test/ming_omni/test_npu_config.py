@@ -22,13 +22,17 @@ class _FakePlatform:
 @pytest.mark.parametrize(
     ("platform", "expected_device", "expected_overrides"),
     [
-        (_FakePlatform("cuda"), "cuda", {}),
+        (
+            _FakePlatform("cuda"),
+            "cuda",
+            {"max_running_requests": 16},
+        ),
         (
             _FakePlatform("npu", npu=True),
             "npu",
             {
+                "max_running_requests": 16,
                 "cuda_graph_backend_decode": "full",
-                "cuda_graph_bs_decode": [1, 2, 4, 8, 16],
                 "cuda_graph_max_bs_decode": 16,
             },
         ),
@@ -53,10 +57,7 @@ def test_ming_pipelines_use_platform_device_and_graph_policy(
         assert stages["image_encoder"].factory_args["device"] == expected_device
 
         thinker_args = stages["thinker"].factory_args
-        if expected_overrides:
-            assert thinker_args["server_args_overrides"] == expected_overrides
-        else:
-            assert "server_args_overrides" not in thinker_args
+        assert thinker_args["server_args_overrides"] == expected_overrides
 
     for stages, talker_name in (
         ({stage.name: stage for stage in configs[1].stages}, "talker"),
@@ -65,3 +66,16 @@ def test_ming_pipelines_use_platform_device_and_graph_policy(
         talker_args = stages[talker_name].factory_args
         assert talker_args["device"] == expected_device
         assert talker_args["enable_cuda_graph"] is True
+
+
+def test_npu_graph_cap_follows_thinker_concurrency(monkeypatch) -> None:
+    monkeypatch.setattr(
+        ming_config, "current_platform", _FakePlatform("npu", npu=True)
+    )
+
+    factory_args = ming_config._thinker_factory_args(max_running_requests=7)
+    overrides = factory_args["server_args_overrides"]
+
+    assert overrides["max_running_requests"] == 7
+    assert overrides["cuda_graph_max_bs_decode"] == 7
+    assert "cuda_graph_bs_decode" not in overrides

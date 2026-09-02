@@ -31,29 +31,37 @@ from sglang_omni.platforms import current_platform
 _PKG = "sglang_omni.models.ming_omni"
 
 
-def _thinker_server_args_overrides() -> dict[str, Any]:
+def _thinker_server_args_overrides(
+    *, max_running_requests: int
+) -> dict[str, Any]:
     """Return platform defaults for the Ming thinker.
 
     Ming's custom multimodal prefill remains eager.  On NPU, capture only the
-    fixed-shape decode path and keep the bucket set bounded to the stage's
-    default maximum of 16 concurrent requests.  An explicit bucket list also
-    avoids SGLang's generic 64-GB-device heuristic, which would otherwise try
-    to capture substantially larger graphs than this pipeline can admit.
+    fixed-shape decode path and cap graph capture at the configured request
+    concurrency. SGLang derives the concrete batch buckets from that cap.
     """
+    overrides: dict[str, Any] = {
+        "max_running_requests": max_running_requests,
+    }
     if current_platform.is_npu():
-        return {
-            "cuda_graph_backend_decode": "full",
-            "cuda_graph_bs_decode": [1, 2, 4, 8, 16],
-            "cuda_graph_max_bs_decode": 16,
-        }
-    return {}
+        overrides.update(
+            {
+                "cuda_graph_backend_decode": "full",
+                "cuda_graph_max_bs_decode": max_running_requests,
+            }
+        )
+    return overrides
 
 
-def _thinker_factory_args(*, enable_streaming_tts: bool = False) -> dict[str, Any]:
+def _thinker_factory_args(
+    *,
+    enable_streaming_tts: bool = False,
+    max_running_requests: int = 16,
+) -> dict[str, Any]:
     args: dict[str, Any] = {"thinker_max_seq_len": 8192}
-    overrides = _thinker_server_args_overrides()
-    if overrides:
-        args["server_args_overrides"] = overrides
+    args["server_args_overrides"] = _thinker_server_args_overrides(
+        max_running_requests=max_running_requests
+    )
     if enable_streaming_tts:
         args["enable_streaming_tts"] = True
     return args
