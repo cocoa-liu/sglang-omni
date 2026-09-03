@@ -326,7 +326,6 @@ def create_talker_executor(
     talker_model_path: str | None = None,
     device: str = "cuda",
     voice: str = "DB30",
-    enable_cuda_graph: bool = True,
 ):
     from sglang_omni.models.ming_omni.components.talker_executor import (
         MingTalkerExecutor,
@@ -340,7 +339,6 @@ def create_talker_executor(
         talker_model_path=talker_model_path,
         device=device,
         voice=voice,
-        enable_cuda_graph=enable_cuda_graph,
     )
     started = False
 
@@ -362,7 +360,6 @@ def create_streaming_talker_executor(
     *,
     device: str = "cuda",
     voice: str = "DB30",
-    enable_cuda_graph: bool = True,
 ):
     """Factory for the streaming TTS talker stage.
 
@@ -380,7 +377,6 @@ def create_streaming_talker_executor(
         model_path=local_path,
         device=device,
         voice=voice,
-        enable_cuda_graph=enable_cuda_graph,
     )
 
 

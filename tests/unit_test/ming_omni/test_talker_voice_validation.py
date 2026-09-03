@@ -799,7 +799,6 @@ def _stub_for_generate(talker: MingOmniTalker, num_steps_before_stop: int):
     talker.his_patch_size = 1
     talker.patch_size = 1
     talker.latent_dim = 1
-    talker.enable_cuda_graph = False
     talker.model = SimpleNamespace(
         config=SimpleNamespace(),
         device=target_device,
@@ -815,8 +814,19 @@ def _stub_for_generate(talker: MingOmniTalker, num_steps_before_stop: int):
         def get_seq_length(self):
             return 1
 
+    graph = SimpleNamespace(replay=lambda: None)
     pool_state = {
-        "tuple": (_NoopCache(), None, None, None, None, None, None),
+        "tuple": (
+            _NoopCache(),
+            _torch.zeros(1, 1, 1, dtype=_torch.bfloat16),
+            _torch.zeros(1, dtype=_torch.long),
+            None,
+            None,
+            SimpleNamespace(
+                hidden_states=(_torch.zeros(1, 1, 1, dtype=_torch.bfloat16),)
+            ),
+            graph,
+        ),
     }
     talker.model_graph_pool = SimpleNamespace(
         get=lambda: pool_state["tuple"],

@@ -54,9 +54,6 @@ def _talker_factory_args() -> dict[str, Any]:
     return {
         "device": current_platform.device_type,
         "voice": "DB30",
-        # Keep the public constructor argument for compatibility. Internally it
-        # now selects the graph implementation from the actual device module.
-        "enable_cuda_graph": current_platform.device_type in {"cuda", "npu"},
     }
 
 
