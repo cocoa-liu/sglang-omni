@@ -25,26 +25,11 @@ from sglang_omni.platforms import current_platform
 _PKG = "sglang_omni.models.ming_omni"
 
 
-def _thinker_server_args_overrides() -> dict[str, Any]:
-    """Return platform defaults for the Ming thinker.
-
-    Ming's custom multimodal prefill remains eager. On NPU, capture only the
-    fixed-shape decode path. SGLang owns the graph cap, bucket generation, and
-    final request-pool clamping.
-    """
-    if current_platform.is_npu():
-        return {"cuda_graph_backend_decode": "full"}
-    return {}
-
-
 def _thinker_factory_args(
     *,
     enable_streaming_tts: bool = False,
 ) -> dict[str, Any]:
     args: dict[str, Any] = {"thinker_max_seq_len": 8192}
-    overrides = _thinker_server_args_overrides()
-    if overrides:
-        args["server_args_overrides"] = overrides
     if enable_streaming_tts:
         args["enable_streaming_tts"] = True
     return args

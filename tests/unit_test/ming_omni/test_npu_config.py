@@ -20,27 +20,16 @@ class _FakePlatform:
 
 
 @pytest.mark.parametrize(
-    ("platform", "expected_device", "expected_overrides"),
+    ("platform", "expected_device"),
     [
-        (
-            _FakePlatform("cuda"),
-            "cuda",
-            {},
-        ),
-        (
-            _FakePlatform("npu", npu=True),
-            "npu",
-            {
-                "cuda_graph_backend_decode": "full",
-            },
-        ),
+        (_FakePlatform("cuda"), "cuda"),
+        (_FakePlatform("npu", npu=True), "npu"),
     ],
 )
-def test_ming_pipelines_use_platform_device_and_graph_policy(
+def test_ming_pipelines_use_platform_device(
     monkeypatch,
     platform: _FakePlatform,
     expected_device: str,
-    expected_overrides: dict[str, object],
 ) -> None:
     monkeypatch.setattr(ming_config, "current_platform", platform)
 
@@ -53,12 +42,6 @@ def test_ming_pipelines_use_platform_device_and_graph_policy(
         stages = {stage.name: stage for stage in config.stages}
         assert stages["audio_encoder"].factory_args["device"] == expected_device
         assert stages["image_encoder"].factory_args["device"] == expected_device
-
-        thinker_args = stages["thinker"].factory_args
-        if expected_overrides:
-            assert thinker_args["server_args_overrides"] == expected_overrides
-        else:
-            assert "server_args_overrides" not in thinker_args
 
     for stages, talker_name in (
         ({stage.name: stage for stage in configs[1].stages}, "talker"),
