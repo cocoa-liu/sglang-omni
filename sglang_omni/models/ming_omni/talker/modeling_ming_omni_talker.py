@@ -97,14 +97,11 @@ class SpkembExtractor:
 
 
 class CFMGraphExecutor:
-    def __init__(
-        self, config, cfm, aggregator, stop_head, *, enable_cuda_graph: bool = True
-    ):
+    def __init__(self, config, cfm, aggregator, stop_head):
         self.config = config
         self.cfm = cfm
         self.aggregator = aggregator
         self.stop_head = stop_head
-        self.enable_cuda_graph = enable_cuda_graph
         self.initialized = False
         self.last_hidden_state_placeholder = None
         self.his_lat_placeholder = None
@@ -143,19 +140,6 @@ class CFMGraphExecutor:
             dtype=input_tensor.dtype,
         )
 
-        if not self.enable_cuda_graph:
-            return self._execute_eager(
-                input_tensor,
-                his_lat,
-                randn_tensor,
-                t,
-                cfg_strength,
-                sigma,
-                temperature,
-                sde_rnd,
-                abort_event,
-            )
-
         if not self.initialized:
             if abort_event is not None and abort_event.is_set():
                 raise asyncio.CancelledError()
@@ -187,38 +171,6 @@ class CFMGraphExecutor:
         stop_out = torch.empty_like(self.stop_out_placeholder)
         stop_out.copy_(self.stop_out_placeholder)
 
-        return gen_lat, inputs_embeds, stop_out
-
-    def _execute_eager(
-        self,
-        input_tensor,
-        his_lat,
-        randn_tensor,
-        timesteps,
-        cfg_strength,
-        sigma,
-        temperature,
-        sde_rnd,
-        abort_event,
-    ):
-        sde_args = torch.tensor(
-            [cfg_strength, sigma, temperature],
-            device=input_tensor.device,
-            dtype=input_tensor.dtype,
-        )
-        gen_lat = self.cfm.sample(
-            input_tensor,
-            his_lat,
-            randn_tensor,
-            timesteps,
-            sde_args,
-            sde_rnd,
-            abort_event=abort_event,
-        )
-        if abort_event is not None and abort_event.is_set():
-            raise asyncio.CancelledError()
-        inputs_embeds = self.aggregator(gen_lat)
-        stop_out = self.stop_head(input_tensor[:, -1, :]).softmax(dim=-1)
         return gen_lat, inputs_embeds, stop_out
 
     def _initialize_graph(
@@ -277,15 +229,12 @@ class CFMGraphExecutorPool:
         aggregator,
         stop_head,
         pool_size=5,
-        *,
-        enable_cuda_graph: bool = True,
     ):
         self.config = config
         self.cfm = cfm
         self.aggregator = aggregator
         self.stop_head = stop_head
         self.pool_size = pool_size
-        self.enable_cuda_graph = enable_cuda_graph
         self.pool: Queue = Queue(maxsize=pool_size)
         self.lock = Lock()
         self._initialize_pool()
@@ -294,11 +243,7 @@ class CFMGraphExecutorPool:
         for _ in range(self.pool_size):
             self.pool.put(
                 CFMGraphExecutor(
-                    self.config,
-                    self.cfm,
-                    self.aggregator,
-                    self.stop_head,
-                    enable_cuda_graph=self.enable_cuda_graph,
+                    self.config, self.cfm, self.aggregator, self.stop_head
                 )
             )
 
@@ -338,10 +283,9 @@ class MingOmniTalker(nn.Module):
     - spk_head: nn.Linear(192, 896)
     """
 
-    def __init__(self, config: MingOmniTalkerConfig, *, enable_cuda_graph: bool = True):
+    def __init__(self, config: MingOmniTalkerConfig):
         super().__init__()
         self.config = config
-        self.enable_cuda_graph = enable_cuda_graph
 
         # Qwen2 LLM backbone
         self.model_config = Qwen2Config(**config.llm_config)
@@ -390,7 +334,6 @@ class MingOmniTalker(nn.Module):
             self.aggregator,
             self.stop_head,
             self.max_conc,
-            enable_cuda_graph=self.enable_cuda_graph,
         )
         self._device_runtime: TalkerDeviceRuntime | None = None
         self.model_graph_pool: queue.Queue = queue.Queue()
@@ -470,9 +413,6 @@ class MingOmniTalker(nn.Module):
             self.tokenizer = tokenizer
 
         with self.initial_lock:
-            if not self.enable_cuda_graph:
-                self.initialized = True
-                return
             if not self.initialized:
                 for _ in range(self.max_conc):
                     this_uuid = str(uuid.uuid1())
@@ -528,23 +468,6 @@ class MingOmniTalker(nn.Module):
             runtime = TalkerDeviceRuntime(device)
             self._device_runtime = runtime
         return runtime
-
-    def _model_decode_forward(
-        self,
-        *,
-        inputs_embeds,
-        cache_position,
-        past_key_values,
-    ):
-        return self.model(
-            position_ids=None,
-            cache_position=cache_position,
-            attention_mask=None,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=True,
-            output_hidden_states=True,
-        )
 
     @torch.no_grad()
     def generate(
@@ -650,37 +573,32 @@ class MingOmniTalker(nn.Module):
                         device=inputs_embeds.device,
                     )
 
-                    if not getattr(self, "enable_cuda_graph", True):
-                        outputs = self._model_decode_forward(
-                            inputs_embeds=inputs_embeds,
-                            cache_position=cache_position,
-                            past_key_values=past_key_values,
-                        )
-                    else:
-                        if model_graph is None:
-                            runtime = self._get_device_runtime()
-                            model_graph = runtime.new_graph()
-                            inputs_embeds_placeholder = torch.empty_like(inputs_embeds)
-                            cache_position_placeholder = torch.empty_like(
-                                cache_position
+                    if model_graph is None:
+                        runtime = self._get_device_runtime()
+                        model_graph = runtime.new_graph()
+                        inputs_embeds_placeholder = torch.empty_like(inputs_embeds)
+                        cache_position_placeholder = torch.empty_like(cache_position)
+
+                        inputs_embeds_placeholder.copy_(inputs_embeds)
+                        cache_position_placeholder.copy_(cache_position)
+
+                        with runtime.graph_context(model_graph):
+                            outputs_placeholder = self.model(
+                                position_ids=None,
+                                cache_position=cache_position_placeholder,
+                                attention_mask=None,
+                                past_key_values=past_key_values,
+                                inputs_embeds=inputs_embeds_placeholder,
+                                use_cache=True,
+                                output_hidden_states=True,
                             )
-
-                            inputs_embeds_placeholder.copy_(inputs_embeds)
+                    else:
+                        inputs_embeds_placeholder.copy_(inputs_embeds)
+                        if cache_position_placeholder is not None:
                             cache_position_placeholder.copy_(cache_position)
+                        model_graph.replay()
 
-                            with runtime.graph_context(model_graph):
-                                outputs_placeholder = self._model_decode_forward(
-                                    inputs_embeds=inputs_embeds_placeholder,
-                                    cache_position=cache_position_placeholder,
-                                    past_key_values=past_key_values,
-                                )
-                        else:
-                            inputs_embeds_placeholder.copy_(inputs_embeds)
-                            if cache_position_placeholder is not None:
-                                cache_position_placeholder.copy_(cache_position)
-                            model_graph.replay()
-
-                        outputs = outputs_placeholder
+                    outputs = outputs_placeholder
 
                 hidden_out = outputs.hidden_states[-1][:, -1:, :]
 

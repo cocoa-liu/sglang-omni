@@ -3,14 +3,19 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import torch
 
 from sglang_omni.models.ming_omni.talker import (
     modeling_ming_omni_talker as talker_model,
 )
+from sglang_omni.models.ming_omni.talker.configuration_bailing_talker import (
+    MingOmniTalkerConfig,
+)
+from sglang_omni.models.ming_omni.talker.device_runtime import TalkerDeviceRuntime
 
 
 def test_cfm_graph_capture_uses_device_runtime(monkeypatch) -> None:
@@ -55,3 +60,43 @@ def test_cfm_graph_capture_uses_device_runtime(monkeypatch) -> None:
         "new_graph",
         ("capture", graph),
     ]
+
+
+def test_use_torch_attention_overrides_both_talker_backends() -> None:
+    config = object.__new__(MingOmniTalkerConfig)
+    config.flowmodel = {"attn_backend": "flash_attn"}
+    config.aggregator = {"attn_backend": "flash_attn"}
+
+    config.use_torch_attention()
+
+    assert config.flowmodel["attn_backend"] == "torch"
+    assert config.aggregator["attn_backend"] == "torch"
+
+
+def test_accelerator_device_runtime_delegates_stream_and_graph(monkeypatch) -> None:
+    stream = object()
+    graph = object()
+    synchronize = Mock()
+    module = SimpleNamespace(
+        Stream=Mock(return_value=stream),
+        stream=Mock(return_value=nullcontext()),
+        current_stream=Mock(return_value=SimpleNamespace(synchronize=synchronize)),
+        NPUGraph=Mock(return_value=graph),
+        graph=Mock(return_value=nullcontext()),
+    )
+    monkeypatch.setattr(torch, "get_device_module", lambda _device: module)
+
+    runtime = TalkerDeviceRuntime("npu:2")
+    with runtime.stream_context(runtime.new_stream()):
+        pass
+    runtime.synchronize()
+    with runtime.graph_context(runtime.new_graph()):
+        pass
+
+    device = torch.device("npu:2")
+    module.Stream.assert_called_once_with(device=device)
+    module.stream.assert_called_once_with(stream)
+    module.current_stream.assert_called_once_with(device)
+    synchronize.assert_called_once_with()
+    module.NPUGraph.assert_called_once_with()
+    module.graph.assert_called_once_with(graph, capture_error_mode="thread_local")

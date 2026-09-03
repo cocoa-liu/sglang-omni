@@ -172,7 +172,6 @@ class MingThinkerStageConfig(EngineStageConfig):
 
 class MingTalkerFactoryArgs(FactoryArgs):
     voice: str | None = Field(default=None, min_length=1)
-    enable_cuda_graph: bool | None = None
 
 
 class MingTalkerStageConfig(StageConfig):
@@ -243,7 +242,6 @@ def _talker_stream_stage(*, gpu: int, process: str) -> StageConfig:
         factory=MingTalkerFactoryArgs(
             device=current_platform.device_type,
             voice="DB30",
-            enable_cuda_graph=current_platform.device_type in {"cuda", "npu"},
         ),
         gpu=gpu,
         terminal=True,
@@ -269,7 +267,6 @@ def _talker_stage(*, gpu: int, process: str) -> StageConfig:
         factory=MingTalkerFactoryArgs(
             device=current_platform.device_type,
             voice="DB30",
-            enable_cuda_graph=current_platform.device_type in {"cuda", "npu"},
         ),
         gpu=gpu,
         terminal=True,

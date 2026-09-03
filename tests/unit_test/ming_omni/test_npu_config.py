@@ -62,4 +62,3 @@ def test_ming_pipelines_use_platform_device_and_graph_policy(
     ):
         talker_args = stages[talker_name].factory
         assert talker_args.device == expected_device
-        assert talker_args.enable_cuda_graph is True
