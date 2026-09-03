@@ -8,7 +8,6 @@ from typing import Any, ClassVar
 from pydantic import Field
 
 from sglang_omni.config.schema import (
-    EngineArgs,
     EngineStageConfig,
     FactoryArgs,
     PipelineConfig,
@@ -32,18 +31,6 @@ from sglang_omni.models.ming_omni.tp_utils import validate_stage_tp_support
 from sglang_omni.platforms import current_platform
 
 _PKG = "sglang_omni.models.ming_omni"
-
-
-def _thinker_server_args_overrides() -> dict[str, Any]:
-    """Return platform defaults for the Ming thinker.
-
-    Ming's custom multimodal prefill remains eager. On NPU, capture only the
-    fixed-shape decode path. SGLang owns the graph cap, bucket generation, and
-    final request-pool clamping.
-    """
-    if current_platform.is_npu():
-        return {"cuda_graph_backend_decode": "full"}
-    return {}
 
 
 def _stage_by_name(stages: list[StageConfig], name: str) -> StageConfig | None:
@@ -190,7 +177,6 @@ def _thinker_stage(*, gpu: int, speech_enabled: bool, process: str) -> StageConf
         process=process,
         factory_path=f"{_PKG}.stages.create_sglang_thinker_executor_from_config",
         factory=MingThinkerFactoryArgs(thinker_max_seq_len=8192),
-        engine=EngineArgs(**_thinker_server_args_overrides()),
         gpu=gpu,
         next=[DECODE_STAGE, TALKER_STAGE] if speech_enabled else DECODE_STAGE,
         stream_to=[DECODE_STAGE],
@@ -212,7 +198,6 @@ def _streaming_thinker_stage(*, gpu: int, process: str) -> StageConfig:
         factory=MingThinkerFactoryArgs(
             thinker_max_seq_len=8192, enable_streaming_tts=True
         ),
-        engine=EngineArgs(**_thinker_server_args_overrides()),
         gpu=gpu,
         next=[DECODE_STAGE, SEGMENTER_STAGE],
         stream_to=[DECODE_STAGE, SEGMENTER_STAGE],
