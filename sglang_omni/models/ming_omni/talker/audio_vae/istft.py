@@ -58,7 +58,11 @@ class ISTFT(nn.Module):
         valid_frame_mask: torch.Tensor | None = None,
         window: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return the unnormalized audio numerator and window denominator."""
+        """Return the unnormalized audio numerator and window denominator.
+
+        ``window`` allows the NPU fallback to use a CPU-local copy of the
+        registered window without moving or modifying the module buffer.
+        """
         assert spec.dim() == 3, "Expected a 3D tensor as input"
         _, _, frame_count = spec.shape
 
