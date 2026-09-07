@@ -86,7 +86,7 @@ class MingTalkerExecutor:
         # 1. Load config from checkpoint
         t0 = time.time()
         config = MingOmniTalkerConfig.from_pretrained_dir(self._talker_model_path)
-        if torch.device(self._device).type == "npu":
+        if self._device == "npu":
             config.use_torch_attention()
 
         # 2. Create model (no weights yet)
