@@ -13,25 +13,25 @@ class TalkerDeviceRuntime:
 
     def __init__(self, device: str | torch.device):
         self.device = torch.device(device)
-        self.module = (
+        self.device_module = (
             None if self.device.type == "cpu" else torch.get_device_module(self.device)
         )
 
     def new_stream(self):
-        if self.module is None:
+        if self.device_module is None:
             return None
-        return self.module.Stream(device=self.device)
+        return self.device_module.Stream(device=self.device)
 
     def stream_context(self, stream):
-        if self.module is None:
+        if self.device_module is None:
             return nullcontext()
-        return self.module.stream(stream)
+        return self.device_module.stream(stream)
 
     def new_graph(self):
-        if self.module is None:
+        if self.device_module is None:
             raise RuntimeError("device graphs are unavailable on CPU")
-        graph_type = getattr(self.module, "CUDAGraph", None) or getattr(
-            self.module, "NPUGraph", None
+        graph_type = getattr(self.device_module, "CUDAGraph", None) or getattr(
+            self.device_module, "NPUGraph", None
         )
         if graph_type is None:
             raise RuntimeError(
@@ -40,11 +40,11 @@ class TalkerDeviceRuntime:
         return graph_type()
 
     def graph_context(self, graph):
-        if self.module is None:
+        if self.device_module is None:
             raise RuntimeError("device graphs are unavailable on CPU")
-        return self.module.graph(graph, capture_error_mode="thread_local")
+        return self.device_module.graph(graph, capture_error_mode="thread_local")
 
     def synchronize(self) -> None:
-        if self.module is None:
+        if self.device_module is None:
             return
-        self.module.current_stream(self.device).synchronize()
+        self.device_module.current_stream(self.device).synchronize()
