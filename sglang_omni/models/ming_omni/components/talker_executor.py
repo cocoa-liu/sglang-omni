@@ -7,7 +7,7 @@ using its own internal LLM + CFM + DiT + AudioVAE pipeline.
 
 The talker is a self-contained TTS system that:
 1. Tokenizes input text with its own tokenizer
-2. Runs its own Qwen2 LLM with StaticCache + CUDA graphs
+2. Runs its own Qwen2 LLM with StaticCache + device graphs
 3. Uses CFM (Conditional Flow Matching) + DiT for diffusion-based audio synthesis
 4. Decodes audio latents to waveform via AudioVAE
 """
