@@ -40,7 +40,6 @@ logger = logging.getLogger(__name__)
 
 _TOKEN_DONE = object()
 
-
 # ---------- Optional: onnxruntime for speaker embedding ----------
 try:
     import onnxruntime
@@ -81,7 +80,8 @@ class SpkembExtractor:
             self.campplus_session.run(
                 None,
                 {
-                    self.campplus_session.get_inputs()[0].name: feat.unsqueeze(dim=0)
+                    self.campplus_session.get_inputs()[0]
+                    .name: feat.unsqueeze(dim=0)
                     .cpu()
                     .numpy()
                 },
@@ -124,7 +124,7 @@ class CFMGraphExecutor:
     ):
         if abort_event is not None and abort_event.is_set():
             raise asyncio.CancelledError()
-        bat_size, _, z_dim = his_lat.shape
+        bat_size, his_patch_size, z_dim = his_lat.shape
         randn_tensor = torch.randn(
             (bat_size, self.config.patch_size, z_dim),
             device=input_tensor.device,
@@ -188,7 +188,7 @@ class CFMGraphExecutor:
         )
         self.sde_rnd_placeholder = torch.empty_like(sde_rnd)
 
-        # Aborting CFM.sample during graph capture corrupts the
+        # (wenyao) Aborting CFM.sample during graph capture corrupts the
         # partial graph. Pass abort_event=None during capture; the caller
         # (execute) checks abort before _initialize_graph and on every replay.
         device_runtime = TalkerDeviceRuntime(input_tensor.device)
@@ -221,14 +221,7 @@ class CFMGraphExecutor:
 
 
 class CFMGraphExecutorPool:
-    def __init__(
-        self,
-        config,
-        cfm,
-        aggregator,
-        stop_head,
-        pool_size=5,
-    ):
+    def __init__(self, config, cfm, aggregator, stop_head, pool_size=5):
         self.config = config
         self.cfm = cfm
         self.aggregator = aggregator
@@ -376,9 +369,9 @@ class MingOmniTalker(nn.Module):
             if param.numel() == 1 and loaded_weight.numel() == 1:
                 param.data.fill_(loaded_weight.item())
             else:
-                assert param.size() == loaded_weight.size(), (
-                    f"Shape mismatch for {name}: param={param.size()}, weight={loaded_weight.size()}"
-                )
+                assert (
+                    param.size() == loaded_weight.size()
+                ), f"Shape mismatch for {name}: param={param.size()}, weight={loaded_weight.size()}"
                 param.data.copy_(loaded_weight)
             loaded.add(name)
 
@@ -658,9 +651,9 @@ class MingOmniTalker(nn.Module):
         abort_event: threading.Event | None = None,
         max_decode_steps: int | None = None,
     ):
-        assert self.tokenizer is not None, (
-            "Tokenizer not set. Call set_tokenizer() first."
-        )
+        assert (
+            self.tokenizer is not None
+        ), "Tokenizer not set. Call set_tokenizer() first."
         tokenizer = self.tokenizer
 
         spk_emb_prompt: list = []

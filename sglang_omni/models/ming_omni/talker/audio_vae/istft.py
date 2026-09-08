@@ -1,5 +1,5 @@
 import torch
-from torch import nn
+import torch.nn as nn
 
 
 class ISTFT(nn.Module):
@@ -102,7 +102,7 @@ class ISTFT(nn.Module):
             raise ValueError("Padding must be 'center' or 'same'.")
 
         assert spec.dim() == 3, "Expected a 3D tensor as input"
-        _, _, T = spec.shape
+        B, N, T = spec.shape
 
         # Inverse FFT
         ifft = torch.fft.irfft(spec, self.n_fft, dim=1, norm="backward")

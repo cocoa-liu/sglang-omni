@@ -867,7 +867,7 @@ def test_generate_emits_final_true_when_stop_token_fires(monkeypatch):
     _stub_for_generate(talker, num_steps_before_stop=4)
 
     monkeypatch.setattr(
-        "sglang_omni.models.ming_omni.talker.modeling_ming_omni_talker.StaticCache",
+        "sglang_omni.models.ming_omni.talker.modeling_ming_omni_talker." "StaticCache",
         lambda **kw: object(),
     )
 
@@ -899,7 +899,7 @@ def test_generate_emits_final_true_when_duration_cap_hits(monkeypatch):
     _stub_for_generate(talker, num_steps_before_stop=None)
 
     monkeypatch.setattr(
-        "sglang_omni.models.ming_omni.talker.modeling_ming_omni_talker.StaticCache",
+        "sglang_omni.models.ming_omni.talker.modeling_ming_omni_talker." "StaticCache",
         lambda **kw: object(),
     )
 
