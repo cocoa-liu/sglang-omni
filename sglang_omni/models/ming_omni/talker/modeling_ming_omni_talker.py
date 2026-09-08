@@ -332,7 +332,7 @@ class MingOmniTalker(nn.Module):
             self.stop_head,
             self.max_conc,
         )
-        self._device_runtime: TalkerDeviceRuntime | None = None
+        self.device_runtime: TalkerDeviceRuntime | None = None
         self.model_graph_pool: queue.Queue = queue.Queue()
         self.past_key_values = None
         for _ in range(self.max_conc):
@@ -460,10 +460,10 @@ class MingOmniTalker(nn.Module):
 
     def _get_device_runtime(self) -> TalkerDeviceRuntime:
         device = torch.device(self.device)
-        device_runtime = getattr(self, "_device_runtime", None)
+        device_runtime = getattr(self, "device_runtime", None)
         if device_runtime is None or device_runtime.device != device:
             device_runtime = TalkerDeviceRuntime(device)
-            self._device_runtime = device_runtime
+            self.device_runtime = device_runtime
         return device_runtime
 
     @torch.no_grad()
