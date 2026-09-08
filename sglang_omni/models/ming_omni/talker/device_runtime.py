@@ -17,17 +17,17 @@ class TalkerDeviceRuntime:
             None if self.device.type == "cpu" else torch.get_device_module(self.device)
         )
 
-    def new_stream(self):
+    def create_stream(self):
         if self.device_module is None:
             return None
         return self.device_module.Stream(device=self.device)
 
-    def stream_context(self, stream):
+    def create_stream_context(self, stream):
         if self.device_module is None:
             return nullcontext()
         return self.device_module.stream(stream)
 
-    def new_graph(self):
+    def create_graph(self):
         if self.device_module is None:
             raise RuntimeError("device graphs are unavailable on CPU")
         graph_type = getattr(self.device_module, "CUDAGraph", None) or getattr(
@@ -39,7 +39,7 @@ class TalkerDeviceRuntime:
             )
         return graph_type()
 
-    def graph_context(self, graph):
+    def create_graph_context(self, graph):
         if self.device_module is None:
             raise RuntimeError("device graphs are unavailable on CPU")
         return self.device_module.graph(graph, capture_error_mode="thread_local")
