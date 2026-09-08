@@ -191,10 +191,10 @@ class CFMGraphExecutor:
         # Aborting CFM.sample during graph capture corrupts the
         # partial graph. Pass abort_event=None during capture; the caller
         # (execute) checks abort before _initialize_graph and on every replay.
-        runtime = TalkerDeviceRuntime(input_tensor.device)
-        self.graph = runtime.create_graph()
+        device_runtime = TalkerDeviceRuntime(input_tensor.device)
+        self.graph = device_runtime.create_graph()
         try:
-            with runtime.create_graph_context(self.graph):
+            with device_runtime.create_graph_context(self.graph):
                 self.gen_lat_placeholder = self.cfm.sample(
                     self.last_hidden_state_placeholder,
                     self.his_lat_placeholder,
@@ -460,11 +460,11 @@ class MingOmniTalker(nn.Module):
 
     def _get_device_runtime(self) -> TalkerDeviceRuntime:
         device = torch.device(self.device)
-        runtime = getattr(self, "_device_runtime", None)
-        if runtime is None or runtime.device != device:
-            runtime = TalkerDeviceRuntime(device)
-            self._device_runtime = runtime
-        return runtime
+        device_runtime = getattr(self, "_device_runtime", None)
+        if device_runtime is None or device_runtime.device != device:
+            device_runtime = TalkerDeviceRuntime(device)
+            self._device_runtime = device_runtime
+        return device_runtime
 
     @torch.no_grad()
     def generate(
@@ -571,15 +571,15 @@ class MingOmniTalker(nn.Module):
                     )
 
                     if model_graph is None:
-                        runtime = self._get_device_runtime()
-                        model_graph = runtime.create_graph()
+                        device_runtime = self._get_device_runtime()
+                        model_graph = device_runtime.create_graph()
                         inputs_embeds_placeholder = torch.empty_like(inputs_embeds)
                         cache_position_placeholder = torch.empty_like(cache_position)
 
                         inputs_embeds_placeholder.copy_(inputs_embeds)
                         cache_position_placeholder.copy_(cache_position)
 
-                        with runtime.create_graph_context(model_graph):
+                        with device_runtime.create_graph_context(model_graph):
                             outputs_placeholder = self.model(
                                 position_ids=None,
                                 cache_position=cache_position_placeholder,
@@ -857,8 +857,8 @@ class MingOmniTalker(nn.Module):
         max_decode_steps: int | None = None,
     ):
         try:
-            runtime = self._get_device_runtime()
-            with runtime.create_stream_context(runtime.create_stream()):
+            device_runtime = self._get_device_runtime()
+            with device_runtime.create_stream_context(device_runtime.create_stream()):
                 for audio_token in self.omni_audio_generation_func(
                     prompt=prompt,
                     text=text,
@@ -875,7 +875,7 @@ class MingOmniTalker(nn.Module):
                 ):
                     if abort_event is not None and abort_event.is_set():
                         raise asyncio.CancelledError()
-                    runtime.synchronize()
+                    device_runtime.synchronize()
                     if token_queue is not None:
                         token_queue.put(audio_token)
                     else:
@@ -904,8 +904,8 @@ class MingOmniTalker(nn.Module):
         abort_event: threading.Event | None = None,
         max_decode_steps: int | None = None,
     ):
-        runtime = self._get_device_runtime()
-        with runtime.create_stream_context(runtime.create_stream()):
+        device_runtime = self._get_device_runtime()
+        with device_runtime.create_stream_context(device_runtime.create_stream()):
             this_uuid = str(uuid.uuid1())
             token_queue = queue.Queue() if stream else None
             effective_abort_event = abort_event
@@ -1008,7 +1008,7 @@ class MingOmniTalker(nn.Module):
                     yield {"tts_speech": this_tts_speech.cpu()}
                     completed = True
 
-                runtime.synchronize()
+                device_runtime.synchronize()
             finally:
                 if stream and not completed:
                     if effective_abort_event is not None:
@@ -1420,8 +1420,8 @@ class MingOmniTalker(nn.Module):
                 "loaded voice presets) or prompt_wav_path. Both are None."
             )
 
-        runtime = self._get_device_runtime()
-        with runtime.create_stream_context(runtime.create_stream()):
+        device_runtime = self._get_device_runtime()
+        with device_runtime.create_stream_context(device_runtime.create_stream()):
             self.initial_graph()
 
             prompt_wav_lat, prompt_wav_emb, spk_emb = self.get_prompt_emb(
@@ -1465,8 +1465,8 @@ class MingOmniTalker(nn.Module):
         **kwargs,
     ):
         abort_event = kwargs.get("abort_event")
-        runtime = self._get_device_runtime()
-        with runtime.create_stream_context(runtime.create_stream()):
+        device_runtime = self._get_device_runtime()
+        with device_runtime.create_stream_context(device_runtime.create_stream()):
             self.initial_graph()
 
             prompt_wav_lat, prompt_wav_emb, spk_emb = self.get_prompt_emb(
