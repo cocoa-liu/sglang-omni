@@ -1397,8 +1397,8 @@ class MingOmniTalker(nn.Module):
         instruction = None
         abort_event = kwargs.get("abort_event")
 
-        # Resolve before grabbing a CUDA stream so bad requests fail fast
-        # without holding CUDA resources.
+        # Resolve before creating a device stream so bad requests fail fast
+        # without holding device resources.
         if prompt_wav_path is not None:
             pass
         elif voice_name is not None and voice_name in self.voice_json_dict:
