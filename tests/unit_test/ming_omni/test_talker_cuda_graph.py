@@ -26,12 +26,12 @@ def test_cfm_graph_capture_uses_device_runtime(monkeypatch) -> None:
         def __init__(self, device):
             events.append(("runtime", device))
 
-        def new_graph(self):
+        def create_graph(self):
             events.append("new_graph")
             return graph
 
         @contextmanager
-        def graph_context(self, captured_graph):
+        def create_graph_context(self, captured_graph):
             events.append(("capture", captured_graph))
             yield
 
@@ -87,10 +87,10 @@ def test_accelerator_device_runtime_delegates_stream_and_graph(monkeypatch) -> N
     monkeypatch.setattr(torch, "get_device_module", lambda _device: module)
 
     runtime = TalkerDeviceRuntime("npu:2")
-    with runtime.stream_context(runtime.new_stream()):
+    with runtime.create_stream_context(runtime.create_stream()):
         pass
     runtime.synchronize()
-    with runtime.graph_context(runtime.new_graph()):
+    with runtime.create_graph_context(runtime.create_graph()):
         pass
 
     device = torch.device("npu:2")
