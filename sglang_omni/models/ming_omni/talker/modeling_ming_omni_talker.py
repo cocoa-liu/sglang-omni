@@ -40,7 +40,6 @@ logger = logging.getLogger(__name__)
 
 _TOKEN_DONE = object()
 
-
 # ---------- Optional: onnxruntime for speaker embedding ----------
 try:
     import onnxruntime
@@ -125,7 +124,7 @@ class CFMGraphExecutor:
     ):
         if abort_event is not None and abort_event.is_set():
             raise asyncio.CancelledError()
-        bat_size, _, z_dim = his_lat.shape
+        bat_size, his_patch_size, z_dim = his_lat.shape
         randn_tensor = torch.randn(
             (bat_size, self.config.patch_size, z_dim),
             device=input_tensor.device,
@@ -189,7 +188,7 @@ class CFMGraphExecutor:
         )
         self.sde_rnd_placeholder = torch.empty_like(sde_rnd)
 
-        # Aborting CFM.sample during graph capture corrupts the
+        # (wenyao) Aborting CFM.sample during graph capture corrupts the
         # partial graph. Pass abort_event=None during capture; the caller
         # (execute) checks abort before _initialize_graph and on every replay.
         device_runtime = TalkerDeviceRuntime(input_tensor.device)
@@ -222,14 +221,7 @@ class CFMGraphExecutor:
 
 
 class CFMGraphExecutorPool:
-    def __init__(
-        self,
-        config,
-        cfm,
-        aggregator,
-        stop_head,
-        pool_size=5,
-    ):
+    def __init__(self, config, cfm, aggregator, stop_head, pool_size=5):
         self.config = config
         self.cfm = cfm
         self.aggregator = aggregator
