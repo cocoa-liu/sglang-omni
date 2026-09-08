@@ -399,7 +399,7 @@ class MingOmniTalker(nn.Module):
     # ---- Device graph initialization ----
 
     def initial_graph(self, tokenizer=None):
-        """Initialize accelerator graphs for generation.
+        """Initialize device graphs for generation.
 
         Args:
             tokenizer: If provided, sets the model tokenizer before graph init.
