@@ -241,9 +241,7 @@ class CFMGraphExecutorPool:
     def _initialize_pool(self):
         for _ in range(self.pool_size):
             self.pool.put(
-                CFMGraphExecutor(
-                    self.config, self.cfm, self.aggregator, self.stop_head
-                )
+                CFMGraphExecutor(self.config, self.cfm, self.aggregator, self.stop_head)
             )
 
     def acquire(self):
