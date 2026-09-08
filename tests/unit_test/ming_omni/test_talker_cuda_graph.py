@@ -86,11 +86,11 @@ def test_accelerator_device_runtime_delegates_stream_and_graph(monkeypatch) -> N
     )
     monkeypatch.setattr(torch, "get_device_module", lambda _device: module)
 
-    runtime = TalkerDeviceRuntime("npu:2")
-    with runtime.create_stream_context(runtime.create_stream()):
+    device_runtime = TalkerDeviceRuntime("npu:2")
+    with device_runtime.create_stream_context(device_runtime.create_stream()):
         pass
-    runtime.synchronize()
-    with runtime.create_graph_context(runtime.create_graph()):
+    device_runtime.synchronize()
+    with device_runtime.create_graph_context(device_runtime.create_graph()):
         pass
 
     device = torch.device("npu:2")
