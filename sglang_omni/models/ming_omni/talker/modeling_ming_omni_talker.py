@@ -460,10 +460,9 @@ class MingOmniTalker(nn.Module):
         return next(self.parameters()).dtype
 
     def _get_device_runtime(self) -> TalkerDeviceRuntime:
-        device = torch.device(self.device)
         device_runtime = getattr(self, "device_runtime", None)
-        if device_runtime is None or device_runtime.device != device:
-            device_runtime = TalkerDeviceRuntime(device)
+        if device_runtime is None:
+            device_runtime = TalkerDeviceRuntime(self.device)
             self.device_runtime = device_runtime
         return device_runtime
 
