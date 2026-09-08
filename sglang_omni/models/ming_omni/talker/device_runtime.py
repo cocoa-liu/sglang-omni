@@ -9,7 +9,7 @@ import torch
 
 
 class TalkerDeviceRuntime:
-    """Provide accelerator stream and graph operations without hard-coding APIs."""
+    """Provide device stream and graph operations without hard-coding APIs."""
 
     def __init__(self, device: str | torch.device):
         self.device = torch.device(device)
