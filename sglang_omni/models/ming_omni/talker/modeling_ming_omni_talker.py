@@ -780,6 +780,14 @@ class MingOmniTalker(nn.Module):
         if sil_cache["buffer"]:
             speech = torch.cat([*sil_cache["buffer"], speech], dim=-1)
             sil_cache["buffer"] = []
+        if last_chunk:
+            tail_len = speech.shape[-1] % frame_size
+            # Score the real tail samples before an all-silence branch can
+            # truncate them. Earlier silence is not trailing if this tail speaks.
+            if tail_len and speech[..., -tail_len:].abs().mean() > sil_th:
+                speech = torch.cat([*sil_cache["holder"], speech], dim=-1)
+                sil_cache["holder"] = []
+                return speech, sil_cache
         if speech.shape[-1] < frame_size:
             sil_cache["buffer"].append(speech)
             if last_chunk:

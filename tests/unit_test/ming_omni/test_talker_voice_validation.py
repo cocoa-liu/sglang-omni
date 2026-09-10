@@ -602,6 +602,33 @@ def test_silence_holder_flushes_partial_final_frame():
     assert cache["buffer"] == []
 
 
+@pytest.mark.parametrize("split", [0, 400, 425])
+@pytest.mark.parametrize("tail_level", [0.0, 0.0015])
+def test_silence_holder_checks_final_tail_activity(split, tail_level):
+    import torch as _torch
+
+    # 400 ms of silence followed by a 50 ms partial frame. Splits exercise
+    # both held silence and a tail spanning the buffer and final input.
+    speech = _torch.cat(
+        [_torch.zeros(1, 400), _torch.full((1, 50), tail_level)], dim=-1
+    )
+    cache = None
+    if split:
+        output, cache = MingOmniTalker.silence_holder(
+            speech[..., :split], sample_rate=1000, sil_cache=cache, last_chunk=False
+        )
+        assert output.numel() == 0
+
+    output, cache = MingOmniTalker.silence_holder(
+        speech[..., split:], sample_rate=1000, sil_cache=cache, last_chunk=True
+    )
+    expected = speech if tail_level > 0 else speech[..., :300]
+    assert _torch.equal(output, expected)
+    if tail_level > 0:
+        assert cache["holder"] == []
+        assert cache["buffer"] == []
+
+
 def test_tts_job_abort_waits_for_worker_and_cleans_caches(monkeypatch):
     import asyncio as _asyncio
     import threading as _threading
