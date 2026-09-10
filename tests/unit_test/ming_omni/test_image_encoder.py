@@ -21,9 +21,7 @@ def test_tp_initialization_uses_platform_backend(monkeypatch) -> None:
     )
     monkeypatch.setattr(dp_attention, "_ATTN_TP_SIZE", None, raising=False)
     monkeypatch.setattr(dp_attention, "_ATTN_TP_RANK", None, raising=False)
-    monkeypatch.setattr(
-        parallel_state, "model_parallel_is_initialized", lambda: False
-    )
+    monkeypatch.setattr(parallel_state, "model_parallel_is_initialized", lambda: False)
     monkeypatch.setattr(
         parallel_state,
         "init_distributed_environment",
