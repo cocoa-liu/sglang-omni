@@ -9,7 +9,7 @@ import torch
 
 
 class TalkerDeviceRuntime:
-    """Provide device stream and graph operations without hard-coding APIs."""
+    """Provide device stream creation, contexts, and synchronization."""
 
     def __init__(self, device: str | torch.device):
         self.device = torch.device(device)
@@ -26,23 +26,6 @@ class TalkerDeviceRuntime:
         if self.device_module is None:
             return nullcontext()
         return self.device_module.stream(stream)
-
-    def create_graph(self):
-        if self.device_module is None:
-            raise RuntimeError("device graphs are unavailable on CPU")
-        graph_type = getattr(self.device_module, "CUDAGraph", None) or getattr(
-            self.device_module, "NPUGraph", None
-        )
-        if graph_type is None:
-            raise RuntimeError(
-                f"device graphs are unavailable for {self.device.type!r}"
-            )
-        return graph_type()
-
-    def create_graph_context(self, graph):
-        if self.device_module is None:
-            raise RuntimeError("device graphs are unavailable on CPU")
-        return self.device_module.graph(graph, capture_error_mode="thread_local")
 
     def synchronize(self) -> None:
         if self.device_module is None:
