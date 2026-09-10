@@ -25,6 +25,7 @@ import torch.nn as nn
 import torchaudio
 from transformers import Qwen2Config, Qwen2Model, StaticCache
 
+from sglang_omni.platforms import current_platform
 from sglang_omni.utils.audio_features import cached_fbank
 
 from .configuration_bailing_talker import MingOmniTalkerConfig
@@ -191,10 +192,14 @@ class CFMGraphExecutor:
         # (wenyao) Aborting CFM.sample during graph capture corrupts the
         # partial graph. Pass abort_event=None during capture; the caller
         # (execute) checks abort before _initialize_graph and on every replay.
-        device_runtime = TalkerDeviceRuntime(input_tensor.device)
-        self.graph = device_runtime.create_graph()
+        graph_backend = current_platform.get_device_graph_backend(input_tensor.device)
+        if graph_backend is None:
+            raise RuntimeError(
+                f"device graphs are unavailable for {input_tensor.device}"
+            )
         try:
-            with device_runtime.create_graph_context(self.graph):
+            with graph_backend.capture(thread_local_errors=True) as graph:
+                self.graph = graph
                 self.gen_lat_placeholder = self.cfm.sample(
                     self.last_hidden_state_placeholder,
                     self.his_lat_placeholder,
@@ -563,15 +568,22 @@ class MingOmniTalker(nn.Module):
                     )
 
                     if model_graph is None:
-                        device_runtime = self._get_device_runtime()
-                        model_graph = device_runtime.create_graph()
+                        graph_backend = current_platform.get_device_graph_backend(
+                            inputs_embeds.device
+                        )
+                        if graph_backend is None:
+                            raise RuntimeError(
+                                f"device graphs are unavailable for {inputs_embeds.device}"
+                            )
                         inputs_embeds_placeholder = torch.empty_like(inputs_embeds)
                         cache_position_placeholder = torch.empty_like(cache_position)
 
                         inputs_embeds_placeholder.copy_(inputs_embeds)
                         cache_position_placeholder.copy_(cache_position)
 
-                        with device_runtime.create_graph_context(model_graph):
+                        with graph_backend.capture(
+                            thread_local_errors=True
+                        ) as model_graph:
                             outputs_placeholder = self.model(
                                 position_ids=None,
                                 cache_position=cache_position_placeholder,

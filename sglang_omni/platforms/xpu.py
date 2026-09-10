@@ -14,12 +14,18 @@ if TYPE_CHECKING:
     from sglang.srt.server_args import ServerArgs
 
     from sglang_omni.pipeline.stage_workers import StageLaunchConfig
+    from sglang_omni.platforms.device_graph import DeviceGraphBackend
 
 
 class XPUOmniPlatform(OmniPlatform):
     _enum: PlatformEnum = PlatformEnum.XPU
     device_name: str = "xpu"
     device_type: str = "xpu"
+
+    def _get_device_graph_backend(self) -> DeviceGraphBackend:
+        from sglang_omni.platforms.device_graph import XpuDeviceGraphBackend
+
+        return XpuDeviceGraphBackend()
 
     def get_device(self, local_rank: int) -> "torch.device":
         return torch.device("xpu", local_rank)

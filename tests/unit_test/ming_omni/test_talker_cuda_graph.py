@@ -18,28 +18,26 @@ from sglang_omni.models.ming_omni.talker.configuration_bailing_talker import (
 from sglang_omni.models.ming_omni.talker.device_runtime import TalkerDeviceRuntime
 
 
-def test_cfm_graph_capture_uses_device_runtime(monkeypatch) -> None:
+def test_cfm_graph_capture_uses_platform_backend(monkeypatch) -> None:
     events: list[object] = []
     graph = object()
 
-    class _FakeDeviceRuntime:
-        def __init__(self, device):
-            events.append(("runtime", device))
-
-        def create_graph(self):
-            events.append("create_graph")
-            return graph
-
+    class _FakeGraphBackend:
         @contextmanager
-        def create_graph_context(self, captured_graph):
-            events.append(("capture", captured_graph))
-            yield
+        def capture(self, *, thread_local_errors):
+            events.append(("capture", thread_local_errors))
+            yield graph
 
     class _CFM:
         def sample(self, _hidden, _history, noise, *_args, **_kwargs):
             return noise + 1
 
-    monkeypatch.setattr(talker_model, "TalkerDeviceRuntime", _FakeDeviceRuntime)
+    get_backend = Mock(return_value=_FakeGraphBackend())
+    monkeypatch.setattr(
+        talker_model,
+        "current_platform",
+        SimpleNamespace(get_device_graph_backend=get_backend),
+    )
     executor = talker_model.CFMGraphExecutor(
         SimpleNamespace(steps=2, patch_size=2),
         _CFM(),
@@ -55,11 +53,8 @@ def test_cfm_graph_capture_uses_device_runtime(monkeypatch) -> None:
 
     assert executor.initialized is True
     assert executor.graph is graph
-    assert events == [
-        ("runtime", input_tensor.device),
-        "create_graph",
-        ("capture", graph),
-    ]
+    get_backend.assert_called_once_with(input_tensor.device)
+    assert events == [("capture", True)]
 
 
 def test_use_torch_attention_overrides_both_talker_backends() -> None:
@@ -73,16 +68,13 @@ def test_use_torch_attention_overrides_both_talker_backends() -> None:
     assert config.aggregator["attn_backend"] == "torch"
 
 
-def test_device_runtime_delegates_stream_and_graph(monkeypatch) -> None:
+def test_device_runtime_delegates_stream_and_synchronization(monkeypatch) -> None:
     stream = object()
-    graph = object()
     synchronize = Mock()
     device_module = SimpleNamespace(
         Stream=Mock(return_value=stream),
         stream=Mock(return_value=nullcontext()),
         current_stream=Mock(return_value=SimpleNamespace(synchronize=synchronize)),
-        NPUGraph=Mock(return_value=graph),
-        graph=Mock(return_value=nullcontext()),
     )
     monkeypatch.setattr(torch, "get_device_module", lambda _device: device_module)
 
@@ -90,15 +82,9 @@ def test_device_runtime_delegates_stream_and_graph(monkeypatch) -> None:
     with device_runtime.create_stream_context(device_runtime.create_stream()):
         pass
     device_runtime.synchronize()
-    with device_runtime.create_graph_context(device_runtime.create_graph()):
-        pass
 
     device = torch.device("npu:2")
     device_module.Stream.assert_called_once_with(device=device)
     device_module.stream.assert_called_once_with(stream)
     device_module.current_stream.assert_called_once_with(device)
     synchronize.assert_called_once_with()
-    device_module.NPUGraph.assert_called_once_with()
-    device_module.graph.assert_called_once_with(
-        graph, capture_error_mode="thread_local"
-    )
