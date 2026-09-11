@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 import os
 import socket
-from dataclasses import dataclass
+from bisect import bisect_left
+from collections import Counter
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -29,7 +31,16 @@ class ModelWorkerConfig:
     weight_prefix: str | None = None
     nccl_port: int | None = None
     total_gpu_memory_fraction: float | None = None
+    kv_cache_bytes: int | None = None
     enable_prefill_input_embeds: bool = False
+
+
+@dataclass(slots=True)
+class _PrefillCudaGraphUsage:
+    replay_count: int = 0
+    standard_eager_count: int = 0
+    custom_eager_count: int = 0
+    replay_buckets: Counter[int] = field(default_factory=Counter)
 
 
 _ARCH_CONFIG_MAP: dict[str, tuple[str, str | None]] = {
@@ -60,20 +71,29 @@ class ModelWorker:
         self.weight_prefix = config.weight_prefix
         self.nccl_port = config.nccl_port
         self.total_gpu_memory_fraction = config.total_gpu_memory_fraction
+        self.kv_cache_bytes = config.kv_cache_bytes
         self.enable_prefill_input_embeds = config.enable_prefill_input_embeds
 
         self.gpu_id = gpu_id
         self.tp_rank = tp_rank
         self._init_model_config()
-        self._configure_backend_policy()
+        effective_quantization = self._configure_backend_policy()
+        from sglang.srt.runtime_context import publish
+
+        publish(self.server_args, role="scheduler")
+        _initialize_model_worker_backend_globals(
+            self.model_config, effective_quantization
+        )
         self._init_model_runner()
         self._init_dllm_algorithm()
+        self._prefill_cuda_graph_usage = _PrefillCudaGraphUsage()
 
         self.device = self.model_runner.device
+        from sglang.srt.runtime_context import get_device
         from sglang.srt.utils import broadcast_pyobj, set_random_seed
 
         self.random_seed = broadcast_pyobj(
-            [server_args.random_seed],
+            [get_device().random_seed],
             self.tp_rank,
             self.model_runner.tp_group.cpu_group,
         )[0]
@@ -103,8 +123,6 @@ class ModelWorker:
 
         self.model_config = ModelConfig.from_server_args(
             server_args=self.server_args,
-            model_path=self.server_args.model_path,
-            model_revision=self.server_args.revision,
             is_draft_model=False,
         )
 
@@ -141,12 +159,15 @@ class ModelWorker:
         model_config.num_key_value_heads = text_cfg.num_key_value_heads
         model_config.hidden_size = text_cfg.hidden_size
         model_config.num_hidden_layers = text_cfg.num_hidden_layers
+        # note(ratish): SGLang sizes the KV pool from the larger of these two
+        # and set the second from the root text config at construction.
+        model_config.num_attention_layers = text_cfg.num_hidden_layers
         if arch == "MingTTSSGLangModel":
             model_config.head_dim = int(text_cfg.head_dim)
             model_config.v_head_dim = model_config.head_dim
             model_config.vocab_size = int(text_cfg.vocab_size)
 
-    def _configure_backend_policy(self) -> None:
+    def _configure_backend_policy(self) -> str | None:
         # Apply Omni-specific quantization adapters (stage-local checkpoint name
         # normalization) before SGLang builds its quant config, then run the
         # model_worker backend policy.
@@ -157,15 +178,10 @@ class ModelWorker:
             self.model_arch_override,
         )
 
-        effective_quantization = current_platform.apply_model_worker_backend_policy(
+        return current_platform.apply_model_worker_backend_policy(
             self.server_args,
             self.model_config,
             self.model_arch_override,
-        )
-        _initialize_model_worker_backend_globals(
-            self.server_args,
-            self.model_config,
-            effective_quantization,
         )
 
     def get_memory_pool(self):
@@ -232,6 +248,7 @@ class ModelWorker:
             model_arch_override=self.model_arch_override,
             weight_prefix=self.weight_prefix,
             total_gpu_memory_fraction=self.total_gpu_memory_fraction,
+            kv_cache_bytes=self.kv_cache_bytes,
         )
 
     def _init_dllm_algorithm(self):
@@ -277,6 +294,10 @@ class ModelWorker:
 
         out = self.model_runner.forward(forward_batch=forward_batch)
         logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
+        self._record_prefill_cuda_graph_usage(
+            forward_batch,
+            can_run_graph=bool(can_run_cuda_graph),
+        )
         batch_result = GenerationBatchResult(
             logits_output=logits_output,
             can_run_cuda_graph=can_run_cuda_graph,
@@ -284,54 +305,100 @@ class ModelWorker:
         )
         return batch_result
 
-    def model_info(self) -> dict[str, Any]:
+    def _record_prefill_cuda_graph_usage(
+        self,
+        forward_batch: Any,
+        *,
+        can_run_graph: bool,
+    ) -> None:
+        mode = forward_batch.forward_mode
+        if not mode.is_extend() or mode.is_cuda_graph():
+            return
+
+        if not can_run_graph:
+            # Note (wenyao): custom eager forwards (visual/deepstack) return
+            # before ModelWorker is called; intentionally absent here.
+            self._prefill_cuda_graph_usage.standard_eager_count += 1
+            return
+
+        runner = self.model_runner.prefill_cuda_graph_runner
+        buckets = runner.capture_num_tokens
+        actual_bucket = buckets[bisect_left(buckets, len(forward_batch.input_ids))]
+        self._prefill_cuda_graph_usage.replay_count += 1
+        self._prefill_cuda_graph_usage.replay_buckets[int(actual_bucket)] += 1
+
+    def record_custom_prefill_eager(self) -> None:
+        """Record a custom prefill forward that bypasses SGLang graph dispatch."""
+        self._prefill_cuda_graph_usage.custom_eager_count += 1
+
+    def _prefill_cuda_graph_info(self) -> dict[str, Any]:
+        from sglang.srt.model_executor.runner.prefill_cuda_graph_runner import (
+            PrefillCudaGraphRunner,
+        )
+
+        runner = self.model_runner.prefill_cuda_graph_runner
+        if isinstance(runner, PrefillCudaGraphRunner):
+            capture_num_tokens = [int(value) for value in runner.capture_num_tokens]
+            backend_runner = type(runner.backend).__name__
+            input_embeds_slot = runner.buffer_registry.has_slot("input_embeds")
+        else:
+            capture_num_tokens, backend_runner, input_embeds_slot = None, None, False
+        from sglang.srt.runtime_context import get_exec
+
+        backend = get_exec().graph.cuda_graph_config.prefill.backend
+        usage = self._prefill_cuda_graph_usage
         return {
-            "model_path": self.server_args.model_path,
-            "load_format": self.server_args.load_format,
-            "weight_version": self.server_args.weight_version,
+            "backend": backend,
+            "runner": type(runner).__name__ if runner is not None else None,
+            "backend_runner": backend_runner,
+            "capture_num_tokens": capture_num_tokens,
+            "input_embeds_slot": input_embeds_slot,
+            "replay_count": int(usage.replay_count),
+            "standard_eager_count": int(usage.standard_eager_count),
+            "custom_eager_count": int(usage.custom_eager_count),
+            "replay_buckets": {
+                str(bucket): int(count)
+                for bucket, count in sorted(usage.replay_buckets.items())
+            },
+        }
+
+    def model_info(self) -> dict[str, Any]:
+        from sglang.srt.runtime_context import get_model, get_parallel, get_serving
+
+        return {
+            "model_path": get_model().model_path,
+            "load_format": get_model().load_format,
+            "weight_version": get_serving().weight_version,
             "tp_rank": self.tp_rank,
-            "tp_size": self.server_args.tp_size,
+            "tp_size": get_parallel().tp_size,
             "model_arch_override": self.model_arch_override,
-            "supports_weight_update": hasattr(
-                self.model_runner, "update_weights_from_disk"
-            ),
+            "supports_weight_update": True,
             "supports_weight_checker": True,
+            "prefill_cuda_graph": self._prefill_cuda_graph_info(),
         }
 
     def update_weights_from_disk(self, payload: dict[str, Any]) -> tuple[bool, str]:
         model_path = payload.get("model_path")
         if not model_path:
             return False, "model_path is required"
+        from sglang.srt.runtime_context import get_model
+
         update = self.model_runner.update_weights_from_disk
-        load_format = payload.get("load_format") or self.server_args.load_format
+        load_format = payload.get("load_format") or get_model().load_format
         success, message = update(
             model_path,
             load_format,
             recapture_cuda_graph=bool(payload.get("recapture_cuda_graph", False)),
         )
-        if success:
-            runner_args = self.model_runner.server_args
-            updated_fields = {
-                "model_path": model_path,
-                "load_format": load_format,
-            }
-            weight_version = payload.get("weight_version")
-            if weight_version is not None:
-                updated_fields["weight_version"] = weight_version
-
+        # The runner's WeightUpdater already records model_path and
+        # load_format in the model bag; weight_version is omni's own field.
+        weight_version = payload.get("weight_version")
+        if success and weight_version is not None:
             override_server_args(
                 self.server_args,
                 "sglang-omni-weight-update-disk",
-                **updated_fields,
+                weight_version=weight_version,
             )
-            if runner_args is not self.server_args:
-                override_server_args(
-                    runner_args,
-                    "sglang-omni-weight-update-disk",
-                    **updated_fields,
-                )
-
-            self.model_runner.model_config.model_path = model_path
         return bool(success), str(message)
 
     def update_weights_from_tensor(self, payload: dict[str, Any]) -> tuple[bool, str]:
@@ -405,13 +472,6 @@ class ModelWorker:
                     "sglang-omni-weight-update-distributed",
                     weight_version=weight_version,
                 )
-                runner_args = self.model_runner.server_args
-                if runner_args is not self.server_args:
-                    override_server_args(
-                        runner_args,
-                        "sglang-omni-weight-update-distributed",
-                        weight_version=weight_version,
-                    )
         return bool(success), str(message)
 
     def weights_checker(self, action: str) -> dict[str, Any]:
@@ -458,11 +518,14 @@ def _apply_model_worker_backend_common_policy(
     server_args: ServerArgs,
     model_arch_override: str | None,
 ) -> str | None:
+    from sglang.srt.arg_groups.model_override_base import resolved_view
+
+    cfg = resolved_view(server_args)
     is_qwen3_omni_arch = model_arch_override in (
         "Qwen3OmniTalker",
         "Qwen3OmniThinkerForCausalLM",
     )
-    if is_qwen3_omni_arch and server_args.ep_size != 1:
+    if is_qwen3_omni_arch and cfg.ep_size != 1:
         raise ValueError(
             "Qwen3-Omni ModelWorker does not support expert parallelism; "
             "use ep_size=1."
@@ -486,18 +549,20 @@ def _apply_omni_quantization_adapters(model_config: ModelConfig) -> None:
 
 
 def _initialize_model_worker_backend_globals(
-    server_args: ServerArgs,
     model_config: ModelConfig,
     effective_quantization: str | None,
 ) -> None:
-    """Initialize backend globals needed by direct workers before model loading."""
+    """Initialize backend globals needed by direct workers before model loading.
+
+    Both initializers read the published config bags, so this runs after publish.
+    """
 
     if model_config_has_moe(model_config):
         from sglang.srt.layers.moe import initialize_moe_config
 
-        initialize_moe_config(server_args)
+        initialize_moe_config()
 
     if effective_quantization == "fp8":
         from sglang.srt.layers.quantization.fp8_utils import initialize_fp8_gemm_config
 
-        initialize_fp8_gemm_config(server_args)
+        initialize_fp8_gemm_config()

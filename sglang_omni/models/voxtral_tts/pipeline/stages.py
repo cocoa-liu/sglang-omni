@@ -15,6 +15,7 @@ import torch
 
 from sglang_omni.models.voxtral_tts.io import VoxtralTTSState
 from sglang_omni.models.voxtral_tts.pipeline.state_io import load_state, store_state
+from sglang_omni.platforms import current_platform
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 from sglang_omni.scheduling.vocoder_base import BatchVocoderBase
@@ -168,7 +169,7 @@ def _enable_inductor_gemm_autotune() -> None:
 def create_generation_executor(
     model_path: str,
     *,
-    device: str = "cuda:0",
+    device: str | None = None,
     gpu_id: int | None = None,
     max_new_tokens: int = 4096,
     server_args_overrides: dict[str, Any] | None = None,
@@ -223,16 +224,17 @@ def _load_voxtral_voice_embeddings(
     voice_dir = os.path.join(checkpoint_dir, "voice_embedding")
     if not os.path.isdir(voice_dir):
         return voice_embeddings
+    map_location = "cpu" if current_platform.is_musa() else device
     for fname in sorted(os.listdir(voice_dir)):
         if not fname.endswith(".pt"):
             continue
         name = fname.removesuffix(".pt")
         emb = torch.load(
             os.path.join(voice_dir, fname),
-            map_location=device,
+            map_location=map_location,
             weights_only=True,
         )
-        voice_embeddings[name] = emb.to(dtype=torch.bfloat16)
+        voice_embeddings[name] = emb.to(device=device, dtype=torch.bfloat16)
     return voice_embeddings
 
 
@@ -394,12 +396,13 @@ class _VoxtralTTSVocoder(BatchVocoderBase):
 def create_vocoder_executor(
     model_path: str,
     *,
-    device: str = "cuda:0",
+    device: str | None = None,
     gpu_id: int | None = None,
 ) -> SimpleScheduler:
+    from sglang_omni.utils.device import resolve_concrete_device
+
+    device = str(resolve_concrete_device(device, gpu_id))
     checkpoint_dir = _resolve_checkpoint(model_path)
-    if gpu_id is not None:
-        device = f"cuda:{gpu_id}"
 
     logger.info("Loading Voxtral audio tokenizer for vocoding...")
     audio_tokenizer = _load_audio_tokenizer(checkpoint_dir, {}, device)

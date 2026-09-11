@@ -15,15 +15,18 @@ from typing import Any, TypeAlias
 
 import torch
 
+from sglang_omni.models.moss_tts.audio_tokenizer import (
+    DEFAULT_MOSS_TTS_LOCAL_AUDIO_TOKENIZER,
+    load_moss_audio_encoder,
+    load_moss_audio_vocoder,
+    resolve_moss_audio_dtype,
+)
 from sglang_omni.models.moss_tts.hf_loading import (
     load_moss_processor_class,
     moss_transformers_processor_compat,
 )
 from sglang_omni.models.moss_tts.request_builders import _DATA_URI_RE
-from sglang_omni.models.moss_tts_local.audio_tokenizer import (
-    DEFAULT_MOSS_TTS_LOCAL_AUDIO_TOKENIZER,
-    load_moss_tts_local_audio_tokenizer,
-)
+from sglang_omni.models.moss_tts_local.config import resolve_vocoder_cuda_graph
 from sglang_omni.models.moss_tts_local.payload_types import (
     moss_tts_local_special_token_defaults,
 )
@@ -127,11 +130,9 @@ def _apply_colocated_ar_memory_budget(
     explicit_mem_fraction = overrides.get("mem_fraction_static")
     applied_codec_mem_reserve = codec_mem_reserve
     if explicit_mem_fraction is not None:
+        # Range is the schema's rule (engine.mem_fraction_static in (0, 1));
+        # only the model's own budget relation is checked here.
         explicit_mem_fraction = float(explicit_mem_fraction)
-        if not 0.0 < explicit_mem_fraction < 1.0:
-            raise ValueError(
-                f"mem_fraction_static must be > 0 and < 1, got {explicit_mem_fraction}"
-            )
         if explicit_mem_fraction > total_gpu_memory_fraction:
             raise ValueError(
                 f"MOSS-TTS Local tts_engine mem_fraction_static cannot exceed "
@@ -200,22 +201,6 @@ def _normalize_processor_config(processor: Any) -> None:
     for attr, default in moss_tts_local_special_token_defaults(audio_vocab_size):
         if getattr(model_config, attr, None) is None:
             setattr(model_config, attr, default)
-
-
-def _resolve_codec_device(device: str | None, gpu_id: int | None) -> str:
-    """Pick the codec GPU for the preprocessing/vocoder stages.
-
-    The ~1B-param codec encoder costs ~0.25 GPU-seconds per reference, which
-    at concurrency 16 starves the AR engine when both share one device.
-    The default config passes an explicit ``device`` so the second-GPU codec
-    placement is visible in the pipeline config. ``gpu_id`` remains a fallback
-    for custom colocated configs and launcher-injected runtime defaults.
-    """
-    if device:
-        return device
-    if gpu_id is not None:
-        return f"cuda:{int(gpu_id)}"
-    return "cuda:0"
 
 
 def _load_moss_tts_local_processor(model_path: str) -> Any:
@@ -542,6 +527,8 @@ def create_preprocessing_executor(
     *,
     device: str | None = None,
     gpu_id: int | None = None,
+    compute_dtype: str | torch.dtype | None = "bfloat16",
+    attention_backend: str = "auto",
     codec_model_path: str | None = None,
     max_concurrency: int = 16,
     encode_batch_size: int = 8,
@@ -567,11 +554,20 @@ def create_preprocessing_executor(
             "off",
             "",
         )
-    device = _resolve_codec_device(device, gpu_id)
+    from sglang_omni.utils.device import resolve_concrete_device
+
+    device = str(resolve_concrete_device(device, gpu_id))
     processor = _load_moss_tts_local_processor(model_path)
-    audio_tokenizer = load_moss_tts_local_audio_tokenizer(
+    resolved_compute_dtype = resolve_moss_audio_dtype(
+        compute_dtype,
+        name="compute_dtype",
+        allow_none=True,
+    )
+    audio_tokenizer = load_moss_audio_encoder(
         _resolve_audio_tokenizer_model_path(processor, codec_model_path),
         device=device,
+        compute_dtype=resolved_compute_dtype,
+        attention_backend=attention_backend,
     )
     reference_encoder: Any = _BatchedReferenceEncoder(
         audio_tokenizer,
@@ -602,7 +598,7 @@ def create_preprocessing_executor(
 def create_sglang_tts_engine_executor(
     model_path: str,
     *,
-    device: str = "cuda:0",
+    device: str | None = None,
     gpu_id: int | None = None,
     dtype: str = "bfloat16",
     server_args_overrides: dict[str, Any] | None = None,
@@ -643,38 +639,62 @@ def create_vocoder_executor(
     *,
     device: str | None = None,
     gpu_id: int | None = None,
+    dtype: str | torch.dtype = "float32",
+    compute_dtype: str | torch.dtype | None = "bfloat16",
+    attention_backend: str = "auto",
     total_gpu_memory_fraction: float | None = None,
     process_total_gpu_memory_fraction: float | None = None,
     codec_model_path: str | None = None,
     max_batch_size: int = 8,
     max_batch_wait_ms: int = 2,
-    stream_slots: int = 15,
+    stream_slots: int = 16,
     stream_chunk_frames: int = 25,
     initial_chunk_frames: int = 5,
     coalesce_floor_frames: int = 5,
-    cuda_graph: bool = True,
-    cuda_graph_frames: list[int] | None = None,
-    cuda_graph_min_free_gb: float = 3.0,
+    vocoder_cuda_graph: bool | None = None,
+    vocoder_cuda_graph_frames: list[int] | None = None,
+    vocoder_cuda_graph_min_free_gb: float = 3.0,
 ) -> MossTTSLocalStreamingVocoderScheduler:
-    device = _resolve_codec_device(device, gpu_id)
+    from sglang_omni.utils.device import resolve_concrete_device
+
+    vocoder_cuda_graph = resolve_vocoder_cuda_graph(vocoder_cuda_graph)
+    device = str(resolve_concrete_device(device, gpu_id))
     processor = _load_moss_tts_local_processor(model_path)
-    audio_tokenizer = load_moss_tts_local_audio_tokenizer(
-        _resolve_audio_tokenizer_model_path(processor, codec_model_path),
+    decoder_dtype = resolve_moss_audio_dtype(
+        dtype,
+        name="dtype",
+        allow_none=False,
+    )
+    assert decoder_dtype is not None
+    resolved_compute_dtype = resolve_moss_audio_dtype(
+        compute_dtype,
+        name="compute_dtype",
+        allow_none=True,
+    )
+    resolved_codec_path = _resolve_audio_tokenizer_model_path(
+        processor, codec_model_path
+    )
+    audio_vocoder = load_moss_audio_vocoder(
+        resolved_codec_path,
         device=device,
+        decoder_dtype=decoder_dtype,
+        compute_dtype=resolved_compute_dtype,
+        attention_backend=attention_backend,
     )
     scheduler = MossTTSLocalStreamingVocoderScheduler(
-        audio_tokenizer.model,
+        audio_vocoder.model,
         n_vq=int(processor.model_config.n_vq),
-        sample_rate=audio_tokenizer.sample_rate,
+        sample_rate=audio_vocoder.sample_rate,
+        attention_backend=attention_backend,
         stream_slots=stream_slots,
         stream_chunk_frames=stream_chunk_frames,
         initial_chunk_frames=initial_chunk_frames,
         coalesce_floor_frames=coalesce_floor_frames,
         max_batch_size=max_batch_size,
         max_batch_wait_ms=max_batch_wait_ms,
-        cuda_graph=cuda_graph,
-        cuda_graph_frames=cuda_graph_frames,
-        cuda_graph_min_free_gb=cuda_graph_min_free_gb,
+        vocoder_cuda_graph=vocoder_cuda_graph,
+        vocoder_cuda_graph_frames=vocoder_cuda_graph_frames,
+        vocoder_cuda_graph_min_free_gb=vocoder_cuda_graph_min_free_gb,
     )
     # Capture graphs in the factory: it runs before the process is marked ready, so serving never
     # races a half-captured graph. Same-process guarantee (each colocate/split stage warms its own).

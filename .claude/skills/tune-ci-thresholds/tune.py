@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse, ast, datetime as dt, hashlib, json, math, os, platform, re, shutil, signal
 import statistics, subprocess, sys, time, tomllib
 from pathlib import Path
+from typing import NamedTuple
 
 __version__ = "0.7.0"
 
@@ -77,41 +78,6 @@ _CRASH_SIGS = (
     "Server process exited",
     "worker crashed",
 )
-
-
-def _flashinfer_cache_dirs(env: dict[str, str] | None = None) -> list[Path]:
-    env = env or os.environ
-    candidates = [
-        Path(env.get("XDG_CACHE_HOME", "")) / "flashinfer"
-        if env.get("XDG_CACHE_HOME")
-        else None,
-        Path(env.get("HOME", "")) / ".cache" / "flashinfer"
-        if env.get("HOME")
-        else None,
-        _CI_HOME / ".cache" / "flashinfer",
-    ]
-    seen: set[Path] = set()
-    paths: list[Path] = []
-    for candidate in candidates:
-        if candidate is None:
-            continue
-        path = candidate.expanduser()
-        if path in seen:
-            continue
-        seen.add(path)
-        paths.append(path)
-    return paths
-
-
-def _cleanup_flashinfer_cache(env: dict[str, str] | None = None) -> None:
-    # Wipe only this job's FlashInfer JIT dir so kernels recompile cleanly.
-    # Concurrent calibration groups must use distinct XDG_CACHE_HOME / HOME
-    # partitions; never delete every candidate path (that races live workers).
-    env = env or os.environ
-    cache_dirs = _flashinfer_cache_dirs(env)
-    if not cache_dirs:
-        return
-    shutil.rmtree(cache_dirs[0], ignore_errors=True)
 
 
 # Metric registry. Each entry encodes how a named metric should be
@@ -349,6 +315,10 @@ _CPUSET_MONITOR_INTERVAL_S = 5.0
 # tests/utils/ci_cpu_contention.py; above this the round measured the
 # intruder, not the model.
 _CONTENTION_FAIL_CORES = 2.0
+# Note (wenyao): and it has to stay above it. One window over the line is a
+# scheduling blip, not a lane takeover, but it costs the whole attempt: a
+# 6-minute stage is ~78 windows, so one bad window discards the other 77.
+_CONTENTION_FAIL_WINDOWS = 3
 # Watchdog return when the live cpuset monitor aborts pytest mid-round.
 _PYTEST_RC_CPUSET_CONTENTION = -2
 
@@ -531,7 +501,7 @@ def precheck_cpuset_gate(host: dict | None) -> tuple[list[str], list[str], dict]
     if not pinned and not explicit:
         errs.append(
             "TUNE_GPU_INCLUDE and OMNI_CI_CPUSET are both unset — calibration "
-            "must name the GPU lane so it can bind the matching 32-core cpuset"
+            "must name the GPU lane so it can bind the matching NUMA-local cpuset"
         )
         detail["status"] = "missing_gpu_group"
         return errs, warns, detail
@@ -665,7 +635,7 @@ def read_pins():
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
     pins = {}
     for dep in data["project"]["dependencies"]:
-        m = re.match(r'^\s*"?([A-Za-z0-9_\-]+)"?\s*==\s*([^\s,"]+)', dep)
+        m = re.match(r'^\s*"?([A-Za-z0-9_\-]+)"?\s*==\s*([^;\s,"]+)', dep)
         if m: pins[m.group(1).lower()] = m.group(2)
     return pins
 
@@ -702,6 +672,31 @@ def venv_version(py, mod):
     return r.stdout.strip()
 
 
+def rust_router_info() -> tuple[dict | None, str | None]:
+    configured = os.environ.get("SGLANG_OMNI_ROUTER_BIN", "").strip()
+    if not configured:
+        return None, "SGLANG_OMNI_ROUTER_BIN is not set"
+    binary = Path(configured).expanduser()
+    if not binary.is_file():
+        return None, f"Rust router binary not found: {binary}"
+    if not os.access(binary, os.X_OK):
+        return None, f"Rust router binary is not executable: {binary}"
+    try:
+        result = subprocess.run(
+            [str(binary), "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f"Rust router version check failed: {exc}"
+    version = result.stdout.strip()
+    if result.returncode != 0 or not version.startswith("sgl-omni-router "):
+        detail = result.stderr.strip() or version or f"exit {result.returncode}"
+        return None, f"Rust router version check failed: {detail}"
+    return {"path": str(binary.resolve()), "version": version}, None
+
+
 def git_info():
     q = lambda c: subprocess.run(c, cwd=REPO_ROOT, capture_output=True,
                                   text=True, check=False).stdout.strip()
@@ -729,10 +724,11 @@ def environment_fingerprint(py: str, cfg: dict, versions: dict) -> dict:
     topology = _command_output(["nvidia-smi", "topo", "-m"])
     env_keys = (
         "HOME", "OMNI_CI_HOME", "HF_HOME", "HF_HUB_DISABLE_XET",
-        "XDG_CACHE_HOME", "HF_ENDPOINT", "TORCHINDUCTOR_CACHE_DIR",
+        "XDG_CACHE_HOME", "SGLANG_CACHE_DIR", "HF_ENDPOINT",
+        "TORCHINDUCTOR_CACHE_DIR", "FLASHINFER_WORKSPACE_BASE",
         "FLASHINFER_DISABLE_VERSION_CHECK", "SEEDTTS_SIM_CACHE_DIR",
         "TUNE_GPU_INCLUDE", "TUNE_GPU_EXCLUDE", "LD_LIBRARY_PATH",
-        "OMNI_CI_CPUSET", "PYTORCH_ALLOC_CONF",
+        "OMNI_CI_CPUSET", "PYTORCH_ALLOC_CONF", "SGLANG_OMNI_ROUTER_BIN",
     )
     image_digest = (
         os.environ.get("OMNI_CI_IMAGE_DIGEST")
@@ -1773,6 +1769,11 @@ def precheck(
         return _summary(errs, warns)
     gi = git_info()
     print(f"git: {gi['branch']} @ {gi['sha'][:8]}{' (dirty)' if gi['dirty'] else ''}")
+    router, router_error = rust_router_info()
+    if router_error:
+        errs.append(router_error)
+    else:
+        print(f"  Rust router: {router['version']} ({router['path']})")
     if not Path(py).exists():
         if src == "default" and tried and len(tried) > 1:
             errs.append(
@@ -1949,6 +1950,7 @@ def precheck(
             timestamp=now_iso(), model=cfg["name"],
             venv_python=py, venv_source=src, versions=versions,
             pins={"sglang": pins.get("sglang"), "torch": pins.get("torch")},
+            rust_router=router,
             git=gi, nvidia_smi_L=smi, gpu_summary=gpu_summary(smi),
             cpuset=cpuset_detail,
             environment_fingerprint="environment-fingerprint.json",
@@ -3381,6 +3383,9 @@ def _run_shared(test_path, stage_keys, all_stages, out, k, py, total, gpus_neede
     # extra_env is derived from test filename at discover — all stages
     # sharing a test file have identical extra_env; just use the first.
     env = os.environ.copy()
+    # Keep worker and router output in the one pytest log followed by Tab B,
+    # even when the calibration shell inherits GitHub Actions variables.
+    env["OMNI_CI_STREAM_SERVER_LOGS"] = "1"
     # Never inherit a shell-level CUDA_VISIBLE_DEVICES — CI gets a fresh
     # container per stage; tune.py picks GPUs after cleanup instead.
     env.pop("CUDA_VISIBLE_DEVICES", None)
@@ -3444,7 +3449,6 @@ def _run_shared(test_path, stage_keys, all_stages, out, k, py, total, gpus_neede
                   f"(calibration continues)")
             time.sleep(_GPU_WAIT_POLL_S)
             continue
-        _cleanup_flashinfer_cache(env)
         shutil.rmtree(basetemp, ignore_errors=True)
         basetemp.mkdir(parents=True)
         picked, gate_err = _launch_gpu_gate(picked, gpus_needed, label, host)
@@ -3499,7 +3503,7 @@ def _run_shared(test_path, stage_keys, all_stages, out, k, py, total, gpus_neede
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
-            pytest_rc = _wait_pytest_with_watchdog(
+            pytest_rc, monitor = _wait_pytest_with_watchdog(
                 pytest_proc, log, label, cpuset=cpuset
             )
         _cleanup_after_pytest(test_path, pytest_proc.pid, basetemp)
@@ -3508,26 +3512,28 @@ def _run_shared(test_path, stage_keys, all_stages, out, k, py, total, gpus_neede
         )
         dur = time.monotonic() - t0
         text = log.read_text(errors="replace") if log.exists() else ""
-        contention_peak = contention_peak_from_log(text)
-        is_contention = (
-            pytest_rc == _PYTEST_RC_CPUSET_CONTENTION
-            or (contention_peak is not None
-                and contention_peak > _CONTENTION_FAIL_CORES)
-        )
-        if is_contention:
-            peak = contention_peak
-            if peak is None and pytest_rc == _PYTEST_RC_CPUSET_CONTENTION:
-                peak = _CONTENTION_FAIL_CORES
+        # Note (wenyao): the session's own [cpuset-contention] line is
+        # recorded, never gated on. That sampler roots its tree at the pytest
+        # pid, so the servers this run double-forks are counted as foreign —
+        # the same misattribution root_pid=1 exists to avoid below. It read
+        # 2.2-3.0 foreign cores on rounds that exited 0 while the live
+        # monitor, watching the same lane, never passed 0.96.
+        session_peak = contention_peak_from_log(text)
+        if pytest_rc == _PYTEST_RC_CPUSET_CONTENTION:
             reason = (
-                f"cpuset_contention (peak {peak:.2f} cores)"
-                if peak is not None
+                f"cpuset_contention ({monitor.describe()})"
+                if monitor is not None
                 else "cpuset_contention"
             )
             attempt_history.append(dict(
                 attempt=attempts, status="discarded", reason=reason,
                 duration_s=round(dur, 2), pytest_rc=pytest_rc,
                 gpu_indices=list(picked), cpuset=cpuset,
-                cpuset_busy_prelaunch=cpuset_busy))
+                cpuset_busy_prelaunch=cpuset_busy,
+                foreign_peak_cores=monitor.peak if monitor else None,
+                foreign_mean_cores=monitor.mean if monitor else None,
+                foreign_windows=monitor.windows if monitor else None,
+                session_summary_peak_cores=session_peak))
             print(f"{label} {reason} — aborting this stage attempt, "
                   f"discarding its artifacts, waiting for CPU+GPU recovery, "
                   f"then retrying (calibration continues)")
@@ -3555,7 +3561,10 @@ def _run_shared(test_path, stage_keys, all_stages, out, k, py, total, gpus_neede
                 attempt=attempts, status=status, reason=reason,
                 duration_s=round(dur, 2), pytest_rc=pytest_rc,
                 gpu_indices=list(picked), cpuset=cpuset,
-                cpuset_busy_prelaunch=cpuset_busy))
+                cpuset_busy_prelaunch=cpuset_busy,
+                foreign_peak_cores=monitor.peak if monitor else None,
+                foreign_mean_cores=monitor.mean if monitor else None,
+                session_summary_peak_cores=session_peak))
             break
         reason = _classify(text, pytest_rc)
         status = "failed"
@@ -3563,7 +3572,10 @@ def _run_shared(test_path, stage_keys, all_stages, out, k, py, total, gpus_neede
             attempt=attempts, status=status, reason=reason,
             duration_s=round(dur, 2), pytest_rc=pytest_rc,
             gpu_indices=list(picked), cpuset=cpuset,
-            cpuset_busy_prelaunch=cpuset_busy))
+            cpuset_busy_prelaunch=cpuset_busy,
+            foreign_peak_cores=monitor.peak if monitor else None,
+            foreign_mean_cores=monitor.mean if monitor else None,
+            session_summary_peak_cores=session_peak))
         retryable = (
             any(s in reason for s in RETRY_SIGS)
             or reason.startswith("crashed")
@@ -3722,18 +3734,46 @@ def _log_crash_detected(text: str) -> str | None:
     return None
 
 
+class ContentionReading(NamedTuple):
+    """What the live monitor saw over one pytest attempt."""
+
+    peak: float
+    mean: float
+    windows: int
+
+    def describe(self) -> str:
+        return (f"peak {self.peak:.2f} cores, mean {self.mean:.2f} over "
+                f"{self.windows} windows")
+
+
+def contention_abort_reason(sampler) -> str | None:
+    """Why the live monitor should discard this attempt, or None to go on.
+
+    A discard costs the attempt's whole runtime and buys nothing, so the
+    evidence has to outlast a single sample window.
+    """
+    if not sampler.sustained_foreign_cores(
+            _CONTENTION_FAIL_WINDOWS, _CONTENTION_FAIL_CORES):
+        return None
+    held_s = _CPUSET_MONITOR_INTERVAL_S * _CONTENTION_FAIL_WINDOWS
+    return (f"foreign load held above {_CONTENTION_FAIL_CORES:.1f} cores for "
+            f"{_CONTENTION_FAIL_WINDOWS} consecutive windows ({held_s:.0f}s)")
+
+
 def _wait_pytest_with_watchdog(
     pytest_proc,
     log_path: Path,
     label: str,
     cpuset: str | None = None,
-) -> int:
+) -> tuple[int, ContentionReading | None]:
     """Poll pytest; abort early on crash signatures or live cpuset intrusion.
 
     When ``cpuset`` is set, a foreign-load sampler watches the reserved cores.
-    Crossing ``_CONTENTION_FAIL_CORES`` kills only this pytest session so the
-    caller can discard the attempt and retry after lane recovery — it does
-    not stop the overall calibration.
+    Sustained load above ``_CONTENTION_FAIL_CORES`` kills only this pytest
+    session so the caller can discard the attempt and retry after lane
+    recovery — it does not stop the overall calibration. The reading comes
+    back either way so a discard records what was measured rather than the
+    threshold that condemned it.
     """
     sampler = None
     poll_s = _PYTEST_POLL_S
@@ -3754,6 +3794,16 @@ def _wait_pytest_with_watchdog(
         poll_s = min(_PYTEST_POLL_S, _CPUSET_MONITOR_INTERVAL_S)
     last_size = 0
     stall_s = 0
+
+    def reading() -> ContentionReading | None:
+        if sampler is None:
+            return None
+        return ContentionReading(
+            peak=sampler.peak_foreign_cores(),
+            mean=sampler.mean_foreign_cores(),
+            windows=sampler.window_count(),
+        )
+
     try:
         while True:
             rc = pytest_proc.poll()
@@ -3764,19 +3814,20 @@ def _wait_pytest_with_watchdog(
                 stall_s = 0 if size > last_size else stall_s + poll_s
                 last_size = size
             if rc is not None:
-                return rc
-            if (sampler is not None
-                    and sampler.peak_foreign_cores() > _CONTENTION_FAIL_CORES):
-                peak = sampler.peak_foreign_cores()
-                print(f"{label} live cpuset monitor: foreign peak "
-                      f"{peak:.2f} cores on {cpuset} — aborting this stage "
-                      f"attempt (will discard + retry after recovery)")
+                return rc, reading()
+            intrusion = (contention_abort_reason(sampler)
+                         if sampler is not None else None)
+            if intrusion is not None:
+                seen = reading()
+                print(f"{label} live cpuset monitor: {intrusion} on {cpuset} "
+                      f"({seen.describe()}) — aborting this stage attempt "
+                      f"(will discard + retry after recovery)")
                 try:
                     os.killpg(pytest_proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pytest_proc.kill()
                 pytest_proc.wait(timeout=30)
-                return _PYTEST_RC_CPUSET_CONTENTION
+                return _PYTEST_RC_CPUSET_CONTENTION, seen
             crash = _log_crash_detected(text[-8000:] if text else "")
             if crash:
                 print(f"{label} crash detected in log ({crash}) — stopping pytest")
@@ -3785,7 +3836,7 @@ def _wait_pytest_with_watchdog(
                 except ProcessLookupError:
                     pytest_proc.kill()
                 pytest_proc.wait(timeout=30)
-                return -1
+                return -1, reading()
             mem = _gpu_memory_by_index()
             peak_note = ""
             if sampler is not None:

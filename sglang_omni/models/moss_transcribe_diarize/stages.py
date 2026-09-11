@@ -71,7 +71,8 @@ def _default_max_new_tokens(model_path: str) -> int:
 def create_sglang_moss_transcribe_diarize_executor(
     model_path: str,
     *,
-    device: str = "cuda:0",
+    device: str | None = None,
+    gpu_id: int | None = None,
     dtype: str = "bfloat16",
     max_running_requests: int = 16,
     max_new_tokens: int | None = None,
@@ -80,8 +81,9 @@ def create_sglang_moss_transcribe_diarize_executor(
     mm_embedding_cache_size_bytes: int = 0,
     encoder_cache_size_bytes: int = 0,
     enable_torch_compile: bool = False,
+    torch_compile_max_bs: int = 4,
     # note (yichi): MOSS-TD overlaps host collect starting at batch size 1;
-    # --decode-mode sync remains the operator opt-out.
+    # --asr.factory.enable_async_decode false remains the operator opt-out.
     enable_async_decode: bool = True,
     async_decode_min_batch_size: int = 1,
     prefill_coalesce_requests: int = 4,
@@ -116,6 +118,7 @@ def create_sglang_moss_transcribe_diarize_executor(
         mm_embedding_cache_size_bytes=mm_embedding_cache_size_bytes,
         encoder_cache_size_bytes=encoder_cache_size_bytes,
         enable_torch_compile=enable_torch_compile,
+        torch_compile_max_bs=torch_compile_max_bs,
         enable_async_decode=enable_async_decode,
         async_decode_min_batch_size=async_decode_min_batch_size,
         encoder_chunk_buckets=buckets,
@@ -136,6 +139,7 @@ def create_sglang_moss_transcribe_diarize_executor(
     ).build(
         model_path,
         device=device,
+        gpu_id=gpu_id,
         dtype=dtype,
         server_args_overrides=server_args_overrides,
     )

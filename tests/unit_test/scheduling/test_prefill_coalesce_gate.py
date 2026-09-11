@@ -58,10 +58,11 @@ class _StubScheduler:
         self.running_batch = SimpleNamespace(is_empty=lambda: False)
         self._request_admission_lock = threading.RLock()
         self._pending_request_builds: dict = {}
+        self._pending_request_admissions: dict = {}
         self._backlogged_request_build_payloads: list = []
 
     def get_new_batch_prefill(self):
-        # sglang 0.5.16 takes running_batch in and hands back a NextBatchPlan;
+        # Upstream takes running_batch in and hands back a NextBatchPlan;
         # unwrap it so the assertions below stay about the gate decision.
         plan = OmniScheduler.get_new_batch_prefill(self, self.running_batch)
         return plan.batch_to_run

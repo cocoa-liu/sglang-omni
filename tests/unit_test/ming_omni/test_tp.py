@@ -10,8 +10,6 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from tests.unit_test.fakes import FakeServerArgs
-
 _PROJECT_PREFIX = "sglang_omni."
 
 
@@ -21,7 +19,6 @@ def _ming_config_with_thinker_tp2(config_cls):
     for stage in stages:
         if stage.name == "thinker":
             stage.tp_size = 2
-            stage.parallelism = stage.parallelism.model_copy(update={"tp": 2})
             stage.gpu = [0, 1]
     return stages
 
@@ -32,7 +29,6 @@ def _build_groups(config, build_stage_groups, prepare_pipeline_runtime):
         return build_stage_groups(
             config,
             stages_cfg=prep.stages_cfg,
-            name_map=prep.name_map,
             endpoints=prep.endpoints,
             placement_plan=prep.placement_plan,
             process_plan=prep.process_plan,
@@ -252,12 +248,12 @@ def test_ming_thinker_tp2_builds_rank_specific_stage_specs(monkeypatch) -> None:
             assert {spec.tp_size for spec in specs} == {2}
             assert specs[0].nccl_port is not None
             assert specs[0].nccl_port == specs[1].nccl_port
-            assert all("gpu_id" not in spec.factory_args for spec in specs)
+            assert all("gpu_id" not in spec.factory_kwargs for spec in specs)
             assert [spec.factory_arg_defaults["gpu_id"] for spec in specs] == [0, 1]
-            assert [spec.factory_args["tp_rank"] for spec in specs] == [0, 1]
-            assert {spec.factory_args["tp_size"] for spec in specs} == {2}
-            assert specs[0].factory_args["nccl_port"] == specs[0].nccl_port
-            assert specs[1].factory_args["nccl_port"] == specs[0].nccl_port
+            assert [spec.factory_kwargs["tp_rank"] for spec in specs] == [0, 1]
+            assert {spec.factory_kwargs["tp_size"] for spec in specs} == {2}
+            assert specs[0].factory_kwargs["nccl_port"] == specs[0].nccl_port
+            assert specs[1].factory_kwargs["nccl_port"] == specs[0].nccl_port
 
             explicit_stages = _ming_config_with_thinker_tp2(MingOmniPipelineConfig)
             for stage in explicit_stages:
@@ -314,7 +310,6 @@ def test_ming_rejects_non_ar_stage_tp_size_gt_one(
     for stage in stages:
         if stage.name == stage_name:
             stage.tp_size = 2
-            stage.parallelism = stage.parallelism.model_copy(update={"tp": 2})
             stage.gpu = gpu
 
     with pytest.raises(ValueError, match=f"{stage_name}.*does not support TP"):
@@ -345,7 +340,6 @@ def test_ming_text_allows_image_encoder_tp_size_gt_one() -> None:
     for stage in stages:
         if stage.name == "image_encoder":
             stage.tp_size = 2
-            stage.parallelism = stage.parallelism.model_copy(update={"tp": 2})
             stage.gpu = [2, 3]
 
     rebuilt = MingOmniPipelineConfig(model_path="dummy", stages=stages)
@@ -398,6 +392,9 @@ def test_ming_speech_allows_talker_outside_explicit_thinker_tp_gpus() -> None:
 def test_ming_bootstrap_aligns_server_args_tp_size_before_infra(
     monkeypatch,
 ) -> None:
+    from sglang.srt.arg_groups.overrides import resolution_result
+    from sglang.srt.server_args import ServerArgs
+
     captured: dict[str, object] = {}
 
     common_module = ModuleType("sglang_omni.models.ming_omni.components.common")
@@ -440,7 +437,7 @@ def test_ming_bootstrap_aligns_server_args_tp_size_before_infra(
         nccl_port,
         model_arch_override,
     ):
-        captured["server_args_tp_size"] = server_args.tp_size
+        captured["server_args_tp_size"] = resolution_result(server_args, "tp_size")
         captured["gpu_id"] = gpu_id
         captured["tp_rank"] = tp_rank
         captured["nccl_port"] = nccl_port
@@ -454,8 +451,6 @@ def test_ming_bootstrap_aligns_server_args_tp_size_before_infra(
             "tree_cache",
             "req_to_token_pool",
             "token_to_kv_pool_allocator",
-            "prefill_mgr",
-            "decode_mgr",
             "model_config",
         )
 
@@ -495,7 +490,8 @@ def test_ming_bootstrap_aligns_server_args_tp_size_before_infra(
     )
 
     bootstrap = importlib.import_module("sglang_omni.models.ming_omni.bootstrap")
-    server_args = FakeServerArgs(tp_size=1)
+    server_args = ServerArgs(model_path="dummy")
+    server_args.resolve_once()
 
     scheduler = bootstrap.create_thinker_scheduler(
         server_args,
@@ -507,7 +503,7 @@ def test_ming_bootstrap_aligns_server_args_tp_size_before_infra(
     )
 
     assert captured["server_args_tp_size"] == 2
-    assert server_args.tp_size == 2
+    assert resolution_result(server_args, "tp_size") == 2
     assert captured["gpu_id"] == 1
     assert captured["tp_rank"] == 1
     assert captured["nccl_port"] == 29500

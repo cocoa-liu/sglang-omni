@@ -426,7 +426,7 @@ class MingStreamingTalkerScheduler:
             self._device,
         )
         config = MingOmniTalkerConfig.from_pretrained_dir(talker_dir)
-        if self._device == "npu":
+        if torch.device(self._device).type == "npu":
             config.use_torch_attention()
         talker = MingOmniTalker(config)
         talker.eval()

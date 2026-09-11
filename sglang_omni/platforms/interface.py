@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING
 
+from sglang.srt.arg_groups.model_override_base import resolved_view
 from sglang.srt.platforms.device_mixin import DeviceMixin
 
 from sglang_omni.utils.misc import normalize_quantization
 
 if TYPE_CHECKING:
     import torch
+    from torch.nn.attention import SDPBackend
 
     from sglang_omni.comm.data_ref import TransportKind
     from sglang_omni.pipeline.stage_workers import StageLaunchConfig
@@ -38,6 +41,14 @@ class OmniPlatform(DeviceMixin):
         """Get the fused QK norm RoPE kernel if available, else return None."""
         return None
 
+    def get_fused_qk_norm_rope_with_cos_sin_cache(self):
+        """Get the cos/sin-cache fused QK norm RoPE kernel, else return None.
+
+        Separate from get_fused_qk_norm_rope: this ABI takes q and k as their own
+        tensors plus a cos/sin table, not the packed QKV and rotary parameters.
+        """
+        return None
+
     def apply_model_worker_backend_policy(
         self,
         server_args: ServerArgs,
@@ -46,8 +57,9 @@ class OmniPlatform(DeviceMixin):
     ) -> str | None:
         """Apply Omni backend policy after checkpoint quantization is known."""
 
+        cfg = resolved_view(server_args)
         effective_quantization = normalize_quantization(model_config.quantization)
-        server_quantization = normalize_quantization(server_args.quantization)
+        server_quantization = normalize_quantization(cfg.quantization)
         if server_quantization is not None:
             effective_quantization = server_quantization
         return effective_quantization
@@ -70,3 +82,29 @@ class OmniPlatform(DeviceMixin):
     def enable_code2wav_graph(self):
         """Check if current platform support Graph for code2wav in Qwen3-Omni"""
         return True
+
+    def enable_talker_graph(self) -> bool:
+        return True
+
+    def enable_thinker_decode_graph(self) -> bool:
+        return True
+
+    def get_decode_cuda_graph_backend(self) -> str | None:
+        return None
+
+    def supports_torchaudio_resample(self) -> bool:
+        """Check if current platform support torchaudio.functional.resample"""
+        return True
+
+    def get_graph_capture_sdpa_backends(self) -> tuple["SDPBackend", ...]:
+        """Empty leaves dispatch alone."""
+        return ()
+
+    def graph_capture_attention(self) -> AbstractContextManager[object]:
+        backends = self.get_graph_capture_sdpa_backends()
+        if not backends:
+            return nullcontext()
+
+        from torch.nn.attention import sdpa_kernel
+
+        return sdpa_kernel(list(backends))

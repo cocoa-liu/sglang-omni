@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import sglang_omni.scheduling.omni_scheduler as omni_scheduler_module
 from sglang_omni.models.fishaudio_s2_pro.model_runner import (
     FishS2ProModelRunner,
     collect_s2pro_step_outputs,
@@ -413,6 +414,7 @@ def test_fish_s2pro_decode_codebooks_keeps_eos_out_of_audio_embedding(
     assert int(audio_decoder.seen_embedding_ids[0][0].item()) == 0
 
 
+@pytest.mark.accelerator
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="multinomial_with_seed needs CUDA"
 )
@@ -571,6 +573,8 @@ def test_fish_tts_request_builder_maps_finish_contract_onto_req() -> None:
     data = request_builder(payload)
 
     assert data.req.rid == "req-contract"
+    assert data.req.sampling_params.repetition_penalty == 1.0
+    assert data.repetition_penalty == 1.05
     assert data.req.sampling_params.stop_token_ids == {99}
     assert data.req.eos_token_ids == {99}
     assert data.req.sampling_params.max_new_tokens == 4
@@ -628,7 +632,9 @@ def test_fish_tts_result_adapter_maps_finish_reason_and_engine_time() -> None:
     assert result_adapter(data).data["finish_reason"] == "stop"
 
 
-def test_fish_req_hits_max_new_tokens_and_scheduler_reports_length() -> None:
+def test_fish_req_hits_max_new_tokens_and_scheduler_reports_length(
+    monkeypatch,
+) -> None:
     """Budget exhaustion runs the upstream length path end-to-end: the Req
     finishes with FINISH_LENGTH and the scheduler maps it onto the terminal
     Fish payload."""
@@ -662,7 +668,11 @@ def test_fish_req_hits_max_new_tokens_and_scheduler_reports_length() -> None:
     scheduler._result_adapter = result_adapter
     scheduler._model_runner = None
     scheduler._stream_output_builder = None
-    scheduler.server_args = SimpleNamespace(weight_version=None)
+    monkeypatch.setattr(
+        omni_scheduler_module,
+        "get_serving",
+        lambda: SimpleNamespace(weight_version=None),
+    )
 
     scheduler.stream_output([req])
 
@@ -708,3 +718,19 @@ def test_fish_tts_stream_output_builder_gates_and_clears_chunks() -> None:
         latest_stream_code_chunk=torch.full((11, 1), 8, dtype=torch.long),
     )
     assert stream_output_builder("non-stream", non_stream_data, None) == []
+
+
+def test_lookahead_is_never_eligible_for_fish():
+    """The in-model sampler reads semantic history, so lookahead must stay off
+    even though the SamplingParams the base gate inspects are history-free."""
+    runner = object.__new__(FishS2ProModelRunner)
+    req = SimpleNamespace(
+        sampling_params=SimpleNamespace(
+            repetition_penalty=1.0,
+            frequency_penalty=0.0,
+            presence_penalty=0.0,
+            min_new_tokens=0,
+        ),
+        custom_logit_processor=None,
+    )
+    assert runner.lookahead_eligible(SimpleNamespace(reqs=[req])) is False
