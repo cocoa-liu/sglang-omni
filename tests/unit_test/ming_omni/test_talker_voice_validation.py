@@ -837,8 +837,6 @@ def _stub_for_generate(talker: MingOmniTalker, num_steps_before_stop: int):
             _NoopCache(),
             _torch.zeros(1, 1, 1, dtype=_torch.bfloat16),
             _torch.zeros(1, dtype=_torch.long),
-            None,
-            None,
             SimpleNamespace(
                 hidden_states=(_torch.zeros(1, 1, 1, dtype=_torch.bfloat16),)
             ),
