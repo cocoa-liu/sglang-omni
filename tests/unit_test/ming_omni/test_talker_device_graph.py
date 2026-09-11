@@ -78,12 +78,12 @@ def test_device_runtime_delegates_stream_and_synchronization(monkeypatch) -> Non
     )
     monkeypatch.setattr(torch, "get_device_module", lambda _device: device_module)
 
-    device_runtime = TalkerDeviceRuntime("npu:2")
+    device_runtime = TalkerDeviceRuntime("cuda:2")
     with device_runtime.create_stream_context(device_runtime.create_stream()):
         pass
     device_runtime.synchronize()
 
-    device = torch.device("npu:2")
+    device = torch.device("cuda:2")
     device_module.Stream.assert_called_once_with(device=device)
     device_module.stream.assert_called_once_with(stream)
     device_module.current_stream.assert_called_once_with(device)
