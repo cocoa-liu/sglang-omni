@@ -463,13 +463,6 @@ def test_tts_job_stream_applies_silence_holder(monkeypatch):
 
     import sglang_omni.models.ming_omni.talker.modeling_ming_omni_talker as talker_mod
 
-    class _NullStream:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
     class _DoneFuture:
         def done(self):
             return True
@@ -491,9 +484,6 @@ def test_tts_job_stream_applies_silence_holder(monkeypatch):
             token_queue.put(talker_mod._TOKEN_DONE)
             return _DoneFuture()
 
-    monkeypatch.setattr(_torch.cuda, "stream", lambda s: _NullStream())
-    monkeypatch.setattr(_torch.cuda, "Stream", lambda device=None: object())
-    monkeypatch.setattr(_torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(
         MingOmniTalker,
         "device",
