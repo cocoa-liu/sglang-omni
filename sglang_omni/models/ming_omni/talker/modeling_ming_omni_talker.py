@@ -334,7 +334,7 @@ class MingOmniTalker(nn.Module):
         self.model_graph_pool: queue.Queue = queue.Queue()
         self.past_key_values = None
         for _ in range(self.max_conc):
-            self.model_graph_pool.put((None, None, None, None, None, None, None))
+            self.model_graph_pool.put((None, None, None, None, None))
 
     # ---- External dependency setters ----
 
@@ -501,8 +501,6 @@ class MingOmniTalker(nn.Module):
             past_key_values,
             inputs_embeds_placeholder,
             cache_position_placeholder,
-            position_ids_placeholder,
-            attention_mask_placeholder,
             outputs_placeholder,
             model_graph,
         ) = self.model_graph_pool.get()
@@ -641,8 +639,6 @@ class MingOmniTalker(nn.Module):
                     past_key_values,
                     inputs_embeds_placeholder,
                     cache_position_placeholder,
-                    position_ids_placeholder,
-                    attention_mask_placeholder,
                     outputs_placeholder,
                     model_graph,
                 )
