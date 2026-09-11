@@ -314,13 +314,13 @@ class MingPreprocessor:
 
         ``videos`` is a list where each item is the per-video frame stack
         produced by ``ensure_video_list_async`` (torch.Tensor shape ``(T, C, H, W)``
-        of float pixels in 0..255). ``Qwen2VLImageProcessor.preprocess(videos=...)``
+        of float pixels in 0..255). ``Qwen2VLVideoProcessor.preprocess(videos=...)``
         groups consecutive frames by ``temporal_patch_size`` and returns flattened
         patches plus ``video_grid_thw`` with the merged temporal dim.
         """
         processor = self._get_video_processor()
         # Convert per-video tensors to numpy arrays in (T, H, W, C) uint8 — the
-        # format Qwen2VLImageProcessor expects when ``videos`` is a list of
+        # format Qwen2VLVideoProcessor expects when ``videos`` is a list of
         # per-video frame stacks.
         np_videos: list[np.ndarray] = []
         for v in videos:
