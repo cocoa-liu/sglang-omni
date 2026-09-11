@@ -28,7 +28,6 @@ from sglang_omni.models.ming_omni.pipeline.next_stage import (
     THINKER_STAGE,
 )
 from sglang_omni.models.ming_omni.tp_utils import validate_stage_tp_support
-from sglang_omni.platforms import current_platform
 
 _PKG = "sglang_omni.models.ming_omni"
 
@@ -108,7 +107,7 @@ def _audio_encoder_stage(*, gpu: int, process: str) -> StageConfig:
         name=AUDIO_STAGE,
         process=process,
         factory_path=f"{_PKG}.stages.create_audio_encoder_executor",
-        factory=FactoryArgs(device=current_platform.device_type, dtype=None),
+        factory=FactoryArgs(dtype=None),
         gpu=gpu,
         next=AGGREGATE_STAGE,
         project_payload={
@@ -124,7 +123,7 @@ def _image_encoder_stage(
         name=IMAGE_STAGE,
         process=process,
         factory_path=f"{_PKG}.stages.create_image_encoder_executor",
-        factory=FactoryArgs(device=current_platform.device_type, dtype=None),
+        factory=FactoryArgs(dtype=None),
         gpu=gpu,
         tp_size=tp_size,
         next=AGGREGATE_STAGE,
@@ -224,10 +223,7 @@ def _talker_stream_stage(*, gpu: int, process: str) -> StageConfig:
         name=TALKER_STREAM_STAGE,
         process=process,
         factory_path=f"{_PKG}.stages.create_streaming_talker_executor",
-        factory=MingTalkerFactoryArgs(
-            device=current_platform.device_type,
-            voice="DB30",
-        ),
+        factory=MingTalkerFactoryArgs(voice="DB30"),
         gpu=gpu,
         terminal=True,
         can_accept_stream_before_payload=True,
@@ -249,10 +245,7 @@ def _talker_stage(*, gpu: int, process: str) -> StageConfig:
         name=TALKER_STAGE,
         process=process,
         factory_path=f"{_PKG}.stages.create_talker_executor",
-        factory=MingTalkerFactoryArgs(
-            device=current_platform.device_type,
-            voice="DB30",
-        ),
+        factory=MingTalkerFactoryArgs(voice="DB30"),
         gpu=gpu,
         terminal=True,
     )
