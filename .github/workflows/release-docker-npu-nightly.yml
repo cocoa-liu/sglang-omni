@@ -18,8 +18,9 @@ permissions:
 
 jobs:
   build:
+    if: github.event_name != 'schedule' || vars.NPU_DOCKER_PUBLISH_ENABLED == 'true'
     uses: ./.github/workflows/release-docker-npu.yml
     with:
-      image_tag: main-cann9.0.0-a3
+      image_tag: main
       publish: ${{ github.event_name != 'pull_request' }}
     secrets: inherit

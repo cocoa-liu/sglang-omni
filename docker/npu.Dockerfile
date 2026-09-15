@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1.7
-# Ascend A3 runtime: SGLang 0.5.19, CANN 9.0.0, Python 3.11,
+# Ascend runtime: SGLang 0.5.19, CANN 9.0.0, Python 3.11,
 # torch/torch_npu 2.10.0, triton-ascend 3.2.1.dev20260530,
 # NPU kernel release 20260826 (wheel version 2026.6.1).
 # The digest pins the complete base dependency stack.
 # Build from the repository root; source is installed from the build context.
+# Defaults to A3; pass the pinned 910b SGLANG_IMAGE for A2.
 ARG SGLANG_IMAGE=lmsysorg/sglang:v0.5.19-cann9.0.0-a3@sha256:55b9ca3b9f2bd67817054f51c55ff64603013f2b211535f77837ed47c3ae05d1
 FROM ${SGLANG_IMAGE}
 

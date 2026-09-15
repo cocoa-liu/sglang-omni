@@ -4,10 +4,15 @@ on:
   push:
     tags: ['v[0-9]+.*']
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish after registry credentials and permissions are configured
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       image_tag:
-        description: Additional image tag, including the hardware suffix
+        description: Additional tag prefix (the hardware suffix is appended)
         type: string
         default: ''
       publish:
@@ -30,6 +35,14 @@ jobs:
   build:
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - device: a3
+            base_image: lmsysorg/sglang:v0.5.19-cann9.0.0-a3@sha256:55b9ca3b9f2bd67817054f51c55ff64603013f2b211535f77837ed47c3ae05d1
+          - device: 910b
+            base_image: lmsysorg/sglang:v0.5.19-cann9.0.0-910b@sha256:19beb175fe8b5a636a14c0f8a95aa92686a36e09b826f214be476b2ae22e7188
     steps:
       - uses: actions/checkout@v4
       - name: Free disk space
@@ -42,14 +55,14 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: lmsysorg/sglang-omni
+          images: ${{ vars.NPU_DOCKER_IMAGE || 'lmsysorg/sglang-omni' }}
           flavor: latest=false
           tags: |
-            type=ref,event=tag,suffix=-cann9.0.0-a3
-            type=sha,suffix=-cann9.0.0-a3
-            type=raw,value=${{ inputs.image_tag }},enable=${{ inputs.image_tag != '' }}
+            type=ref,event=tag,suffix=-cann9.0.0-${{ matrix.device }}
+            type=sha,suffix=-cann9.0.0-${{ matrix.device }}
+            type=raw,value=${{ inputs.image_tag }}-cann9.0.0-${{ matrix.device }},enable=${{ inputs.image_tag != '' }}
       - name: Log into Docker Hub
-        if: github.repository == 'sgl-project/sglang-omni' && github.event_name != 'pull_request' && (inputs.publish || github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        if: github.repository == 'sgl-project/sglang-omni' && vars.NPU_DOCKER_PUBLISH_ENABLED == 'true' && github.event_name != 'pull_request' && (inputs.publish || github.event_name == 'push')
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -59,11 +72,12 @@ jobs:
         with:
           context: .
           file: docker/npu.Dockerfile
-          # Expand only after the corresponding hardware/architecture is validated.
           platforms: linux/arm64
+          build-args: |
+            SGLANG_IMAGE=${{ matrix.base_image }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          push: ${{ github.repository == 'sgl-project/sglang-omni' && github.event_name != 'pull_request' && (inputs.publish || github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+          push: ${{ github.repository == 'sgl-project/sglang-omni' && vars.NPU_DOCKER_PUBLISH_ENABLED == 'true' && github.event_name != 'pull_request' && (inputs.publish || github.event_name == 'push') }}
           provenance: false
-          cache-from: type=gha,scope=npu-a3
-          cache-to: type=gha,mode=max,scope=npu-a3
+          cache-from: type=gha,scope=npu-${{ matrix.device }}
+          cache-to: type=gha,mode=max,scope=npu-${{ matrix.device }}
