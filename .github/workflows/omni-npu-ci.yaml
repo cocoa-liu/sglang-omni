@@ -1,0 +1,48 @@
+name: NPU CI
+
+# Manual-only until the NPU runner fleet and permissions are provisioned.
+on:
+  workflow_dispatch:
+    inputs:
+      device_type:
+        description: Runner hardware (must match the image)
+        type: choice
+        options: [a3, 910b]
+        default: a3
+      image:
+        description: Compatible Omni environment image pinned with @sha256
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omni-npu-ci-${{ inputs.device_type }}
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    if: vars.NPU_CI_ENABLED == 'true'
+    runs-on: [self-hosted, linux, ARM64, 'omni-npu-${{ inputs.device_type }}']
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run checked-out source on NPU
+        env:
+          NPU_CI_IMAGE: ${{ inputs.image }}
+          NPU_CI_DEVICE: ${{ vars.NPU_CI_DEVICE }}
+        run: |
+          [[ "$NPU_CI_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]] || {
+            echo 'Use an immutable image digest.' >&2
+            exit 1
+          }
+          bash scripts/npu/run_ci.sh
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npu-smoke-${{ inputs.device_type }}-${{ github.run_id }}
+          path: npu-ci-results/
+          if-no-files-found: warn
+          retention-days: 7
