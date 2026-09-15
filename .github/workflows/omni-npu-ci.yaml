@@ -23,8 +23,6 @@ permissions:
 jobs:
   preflight:
     runs-on: ubuntu-latest
-    outputs:
-      runner: ${{ steps.config.outputs.runner }}
     steps:
       - name: Check live PR approval
         if: github.event_name == 'pull_request'
@@ -42,23 +40,17 @@ jobs:
               core.setFailed('This run is stale; run CI for the latest PR commit.');
             }
       - name: Validate integration configuration
-        id: config
         env:
-          RUNNER_LABELS: ${{ vars.NPU_CI_RUNNER_LABELS }}
           IMAGE: ${{ vars.NPU_CI_IMAGE }}
           DEVICE: ${{ vars.NPU_CI_DEVICE }}
           DATA_DIR: ${{ vars.NPU_CI_DATA_DIR }}
         run: |
           python - <<'PY'
-          import json, os, re
-          labels = json.loads(os.environ.get('RUNNER_LABELS') or '[]')
-          assert isinstance(labels, list) and labels and all(isinstance(x, str) and x and 'REPLACE' not in x for x in labels), 'Set NPU_CI_RUNNER_LABELS to the approved runner labels JSON array'
+          import os, re
           assert re.fullmatch(r'.+@sha256:[0-9a-f]{64}', os.environ['IMAGE']), 'Set NPU_CI_IMAGE to a tested image digest'
           assert re.fullmatch(r'[0-9]+', os.environ['DEVICE']), 'Set NPU_CI_DEVICE to one reserved physical device ID'
           path = os.environ['DATA_DIR']
           assert path.startswith('/') and path != '/' and 'REPLACE' not in path, 'Set NPU_CI_DATA_DIR to the prepared host data directory'
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write('runner=' + json.dumps(labels) + '\n')
           PY
 
   models:
@@ -66,7 +58,7 @@ jobs:
     # Configure required reviewers on this environment BEFORE enabling hardware
     # execution. A persistent PR label is not approval of every new commit.
     environment: npu-ci
-    runs-on: ${{ fromJson(needs.preflight.outputs.runner) }}
+    runs-on: linux-aarch64-a2-2
     timeout-minutes: 60
     strategy:
       fail-fast: false

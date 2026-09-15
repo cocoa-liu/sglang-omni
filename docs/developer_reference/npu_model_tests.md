@@ -1,7 +1,8 @@
 # NPU model CI
 
 The workflow covers Qwen3-TTS 0.6B CustomVoice and Qwen3-ASR 1.7B on one reserved
-NPU. It runs for relevant PR changes, manually, and nightly at 16:00 UTC.
+NPU on the `linux-aarch64-a2-2` ARM64 A2 runner. It runs for relevant PR changes,
+manually, and nightly at 16:00 UTC.
 Missing integration settings fail preflight, not pass or skip hardware checks.
 Qwen3-TTS requires the NPU support from PR #2004. No GPU speed baselines are used.
 
@@ -11,9 +12,8 @@ Set these **repository variables** after replacing the placeholders:
 
 | Variable | Placeholder | Information to request |
 |---|---|---|
-| `NPU_CI_RUNNER_LABELS` | `["self-hosted", "linux", "ARM64", "REPLACE_WITH_NPU_LABEL"]` | Labels of a runner authorized for this repository; its A2/A3 hardware and driver |
 | `NPU_CI_DEVICE` | `REPLACE_WITH_RESERVED_DEVICE_ID` | One exclusively reserved physical device, the same on every runner matching the labels |
-| `NPU_CI_IMAGE` | `REPLACE_WITH_REGISTRY/IMAGE@sha256:REPLACE_WITH_DIGEST` | Compatible ARM64 environment image; use the Docker PR's published digest for integrated validation |
+| `NPU_CI_IMAGE` | `lmsysorg/sglang-omni@sha256:REPLACE_WITH_A2_DIGEST` | Compatible ARM64 A2/910B environment image; use the Docker PR's published A2 digest for integrated validation |
 | `NPU_CI_DATA_DIR` | `/REPLACE_WITH_HOST_CACHE/npu-ci` | Absolute host directory with the weights, serving configs and fixed ASR fixtures below |
 
 Also ask an administrator to:
@@ -31,6 +31,8 @@ Also ask an administrator to:
    pre-merge workflow testing route: PR events or a reviewed upstream branch.
    A new manual workflow is not selectable until GitHub knows it on main.
 
+The runner label is fixed; no `NPU_CI_RUNNER_LABELS` variable is needed. Confirm
+the physical device allocation rather than inferring it from the label suffix.
 The workflow serializes model jobs sharing the reserved device. Local runs
 must reserve the device separately. Testing A3 does not qualify A2.
 
@@ -87,7 +89,7 @@ Run workflow**, or approve a relevant PR's jobs. `NPU Model CI Status` requires
 both models to pass. Only enable it as a required merge check after real Actions
 validation; account for path filters in the repository's required-check policy.
 
-For local execution, export the four variables above, then select a model:
+For local execution, export the three variables above, then select a model:
 
 ```bash
 NPU_CI_MODEL=qwen3-tts bash scripts/npu/run_model_ci.sh
