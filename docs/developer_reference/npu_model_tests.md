@@ -1,11 +1,112 @@
-# NPU model regressions
+# NPU model CI
 
-This first suite covers Qwen3-TTS CustomVoice, Base and VoiceDesign via the
-existing speech API. It is opt-in and has no GPU speed thresholds. Qwen3-TTS
-NPU execution/configurations depend on PR #2004; do not claim this suite passes
-on a main revision that does not yet contain that support.
+The workflow covers Qwen3-TTS 0.6B CustomVoice and Qwen3-ASR 1.7B on one reserved
+NPU. It runs for relevant PR changes, manually, and nightly at 16:00 UTC.
+Missing integration settings fail preflight, not pass or skip hardware checks.
+Qwen3-TTS requires the NPU support from PR #2004. No GPU speed baselines are used.
 
-## Run one model
+## Integration checklist — ask the maintainers
+
+Set these **repository variables** after replacing the placeholders:
+
+| Variable | Placeholder | Information to request |
+|---|---|---|
+| `NPU_CI_RUNNER_LABELS` | `["self-hosted", "linux", "ARM64", "REPLACE_WITH_NPU_LABEL"]` | Labels of a runner authorized for this repository; its A2/A3 hardware and driver |
+| `NPU_CI_DEVICE` | `REPLACE_WITH_RESERVED_DEVICE_ID` | One exclusively reserved physical device, the same on every runner matching the labels |
+| `NPU_CI_IMAGE` | `REPLACE_WITH_REGISTRY/IMAGE@sha256:REPLACE_WITH_DIGEST` | Compatible ARM64 environment image; use the Docker PR's published digest for integrated validation |
+| `NPU_CI_DATA_DIR` | `/REPLACE_WITH_HOST_CACHE/npu-ci` | Absolute host directory with the weights, serving configs and fixed ASR fixtures below |
+
+Also ask an administrator to:
+
+1. Create the `npu-ci` GitHub Environment with **required reviewers**, and allow
+   the intended PR refs. Review the exact commit before approving each job.
+   The workflow also requires a non-draft PR with `run-ci`, but a label retained
+   across pushes is not approval of new code.
+2. Confirm trusted-runner Docker/privileged access, host networking and Ascend
+   mount paths in `scripts/npu/run_model_ci.sh`. This is not a sandbox for
+   unreviewed fork code. Workflow changes themselves must be reviewed.
+3. Allow registry and PyPI access or configure approved mirrors. Model inference
+   uses local weights with `HF_HUB_OFFLINE=1`.
+4. Grant permission to trigger/rerun Actions and read artifacts. Confirm the
+   pre-merge workflow testing route: PR events or a reviewed upstream branch.
+   A new manual workflow is not selectable until GitHub knows it on main.
+
+The workflow serializes model jobs sharing the reserved device. Local runs
+must reserve the device separately. Testing A3 does not qualify A2.
+
+## Prepare the data directory
+
+```text
+npu-ci/
+  models/
+    qwen3-tts/       # Qwen3-TTS-12Hz-0.6B-CustomVoice, with speech_tokenizer/
+    qwen3-asr/       # Qwen3-ASR-1.7B
+  configs/
+    qwen3-tts.yaml   # approved single-NPU serving config
+    qwen3-asr.yaml   # approved single-NPU serving config
+  asr/
+    cases.json
+    english.wav
+    chinese.wav
+```
+
+Ask model owners for immutable checkpoint revisions and matching serving
+configs. For TTS, start from `examples/configs/qwen3_tts_0_6b_customvoice_npu.yaml`
+in #2004. Stage placement uses logical device 0. Config paths must be accessible
+inside the container. Symlink targets must also reside in the mounted data
+directory. Keep revisions in the cache inventory; do not overwrite assets
+during CI runs.
+
+`cases.json` uses actual transcripts and per-fixture CER ceilings calibrated
+on an approved NPU baseline. Replace all placeholders; no default quality
+threshold is silently supplied:
+
+```json
+{
+  "English": {
+    "audio": "english.wav",
+    "text": "REPLACE_WITH_EXACT_ENGLISH_TRANSCRIPT",
+    "max_cer": "REPLACE_WITH_CALIBRATED_NUMBER_BELOW_1"
+  },
+  "Chinese": {
+    "audio": "chinese.wav",
+    "text": "REPLACE_WITH_EXACT_CHINESE_TRANSCRIPT",
+    "max_cer": "REPLACE_WITH_CALIBRATED_NUMBER_BELOW_1"
+  }
+}
+```
+
+Use short, licensed audio without personal data: transcripts and generated
+audio appear in CI artifacts. CER uses Unicode NFKC/case folding and removes
+punctuation/whitespace in both languages; it does not replace corpus WER.
+
+## Run CI
+
+After configuring variables and environment protection, use **NPU Model CI →
+Run workflow**, or approve a relevant PR's jobs. `NPU Model CI Status` requires
+both models to pass. Only enable it as a required merge check after real Actions
+validation; account for path filters in the repository's required-check policy.
+
+For local execution, export the four variables above, then select a model:
+
+```bash
+NPU_CI_MODEL=qwen3-tts bash scripts/npu/run_model_ci.sh
+NPU_CI_MODEL=qwen3-asr bash scripts/npu/run_model_ci.sh
+```
+
+The image supplies dependencies; checked-out source is copied and installed in
+a disposable container using `--no-deps`. Results include source SHA/status,
+image metadata, serving config, package versions, NPU state, server logs,
+outputs and JUnit. Actions uploads `npu-ci-results/` for seven days. Only this
+run's container is removed; a hard-killed runner may need operator cleanup.
+
+Each model runs five pytest cases. ASR checks English/Chinese CER, complete SSE
+with consistent deltas, two concurrent requests and recovery after rejection.
+TTS checks are listed below. Confirm non-skipped test counts, not only a green
+job. Before making this a merge gate, validate success, intentional failure,
+cancellation/timeout cleanup, artifacts and execution against a changed SHA.
+
+## Run TTS variants directly
 
 In a compatible environment with exactly one reserved visible NPU, install the
 source revision under test and use that model's NPU serving config:
@@ -63,6 +164,5 @@ are not assumed to equal model chunk boundaries.
 
 No global CUDA/NPU process cleanup is used. The shared `managed_omni_server`
 context stops only the server it started. Prefer a disposable container for CI
-so cancellation can also clean up descendants. Future runner integration should
-record both the source SHA and image digest, archive logs on failure and avoid
-automatic retries of deterministic failures.
+so cancellation can also clean up descendants. The CI script records source and
+image metadata, archives logs on failure and does not retry failed tests.

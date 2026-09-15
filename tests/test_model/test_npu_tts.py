@@ -58,6 +58,7 @@ def tts_server(tmp_path_factory):
     model = Path(os.environ["OMNI_NPU_TTS_MODEL"]).resolve()
     config = Path(os.environ["OMNI_NPU_TTS_CONFIG"]).resolve()
     assert (model / "config.json").is_file(), "A complete local model is required"
+    assert (model / "speech_tokenizer").is_dir(), "Include speech_tokenizer weights"
     assert config.is_file(), "Supply the model's NPU serving config"
     task = os.environ.get("OMNI_NPU_TTS_TASK", "CustomVoice")
     assert task in {"CustomVoice", "Base", "VoiceDesign"}
@@ -136,8 +137,8 @@ def _request(base_url, payload, output, name, stream=False):
                         first_byte = time.monotonic() - start
                     chunks.append(chunk)
     audio = b"".join(chunks)
-    duration = _validate_pcm(audio) if stream else _validate_wav(audio)
     (output / f"{name}.{'pcm' if stream else 'wav'}").write_bytes(audio)
+    duration = _validate_pcm(audio) if stream else _validate_wav(audio)
     (output / f"{name}.json").write_text(
         json.dumps(
             {
