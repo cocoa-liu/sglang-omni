@@ -8,11 +8,19 @@ Qwen3-TTS requires the NPU support from PR #2004. No GPU speed baselines are use
 
 ## Integration checklist — ask the maintainers
 
-Set these **repository variables** after replacing the placeholders:
+The workflow temporarily uses runner `linux-aarch64-a2-2`, physical device `0`,
+and `cocoa001/sglang-omni:qwen3-tts-npu-a2-d794efee`, pinned to digest
+`sha256:2211349c4664cf792ab989e0f50a615d05d621fb12e6d84dde890c8f39a45823`.
+Confirm runner/device allocation before execution and replace the personal image
+with a validated official A2 image before production CI. The existing A3 model
+results do not qualify this A2 environment or Qwen3-ASR.
+
+Set these **repository variables**; image and device override the temporary
+defaults, while the data directory is still required:
 
 | Variable | Placeholder | Information to request |
 |---|---|---|
-| `NPU_CI_DEVICE` | `REPLACE_WITH_RESERVED_DEVICE_ID` | One exclusively reserved physical device, the same on every runner matching the labels |
+| `NPU_CI_DEVICE` | Temporary default: `0` | Confirm one exclusively reserved physical device, the same on every runner matching the label |
 | `NPU_CI_IMAGE` | `lmsysorg/sglang-omni@sha256:REPLACE_WITH_A2_DIGEST` | Compatible ARM64 A2/910B environment image; use the Docker PR's published A2 digest for integrated validation |
 | `NPU_CI_DATA_DIR` | `/REPLACE_WITH_HOST_CACHE/npu-ci` | Absolute host directory with the weights, serving configs and fixed ASR fixtures below |
 
@@ -31,7 +39,7 @@ Also ask an administrator to:
    pre-merge workflow testing route: PR events or a reviewed upstream branch.
    A new manual workflow is not selectable until GitHub knows it on main.
 
-The runner label is fixed; no `NPU_CI_RUNNER_LABELS` variable is needed. Confirm
+The runner label is temporarily fixed; no `NPU_CI_RUNNER_LABELS` variable is needed. Confirm
 the physical device allocation rather than inferring it from the label suffix.
 The workflow serializes model jobs sharing the reserved device. Local runs
 must reserve the device separately. Testing A3 does not qualify A2.
