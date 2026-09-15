@@ -12,8 +12,8 @@ enable every Omni model automatically.
 - Compatible host drivers and firmware; see the HDK links in
   [NPU prerequisites](installation_npu.md#prerequisites). Check `npu-smi info`
   on the host before starting.
-- Enough device memory and disk space for the selected model. The Ming example
-  below uses four devices; adjust placement and memory settings for your hardware.
+- Enough device memory and disk space for the selected model. The Qwen3-TTS
+  example below uses one device and a model-specific NPU configuration.
 
 The runtime is already installed inside the image. Do not rerun the source
 installation or TorchCodec stack-upgrade scripts inside it.
@@ -48,36 +48,31 @@ for deployments. A successful build alone does not verify inference on A2 or A3.
 
 ## 2. Prepare the model
 
-This example uses the main-branch Ming-Omni text pipeline. Download weights to
-a host directory using the image's Hugging Face CLI, or use an existing checkpoint:
+This example uses Qwen3-TTS 0.6B CustomVoice, which generates speech with built-in
+voices without reference audio. Download weights to a host directory using the
+image's Hugging Face CLI, or use an existing complete checkpoint, including
+`speech_tokenizer/`:
 
 ```bash
-MODEL_DIR=/mnt/models/Ming-flash-omni-2.0
+MODEL_DIR=/mnt/models/Qwen3-TTS-12Hz-0.6B-CustomVoice
 mkdir -p "$MODEL_DIR"
 docker run --rm \
   -v "$MODEL_DIR:/model" \
-  "$IMAGE" hf download inclusionAI/Ming-flash-omni-2.0 --local-dir /model
-
-# Ming uses the Preview checkpoint's tokenizer files.
-docker run --rm \
-  -v "$MODEL_DIR:/model" \
-  "$IMAGE" hf download inclusionAI/Ming-flash-omni-Preview \
-  tokenizer.json tokenizer_config.json special_tokens_map.json --local-dir /model
+  "$IMAGE" hf download Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice \
+  --revision 85e237c12c027371202489a0ec509ded67b5e4b5 --local-dir /model
 ```
 
 ## 3. Start the service
 
-The example exposes physical devices 0–3 and binds the API to host loopback.
-Replace the device IDs and driver mount paths if your host differs. `--privileged`
+The example uses physical device 0 and binds the API to host loopback.
+Replace the device ID and driver mount paths if your host differs. `--privileged`
 grants broad host access: use this quickstart only on a trusted host; production
 deployments should use their platform's restricted device-access configuration.
 
 ```bash
 docker run -d --name omni-npu \
-  --privileged --shm-size 32g \
-  -p 127.0.0.1:8000:8000 \
-  --device /dev/davinci0 --device /dev/davinci1 \
-  --device /dev/davinci2 --device /dev/davinci3 \
+  --privileged --network host --shm-size 8g \
+  --device /dev/davinci0 \
   --device /dev/davinci_manager \
   --device /dev/devmm_svm --device /dev/hisi_hdc \
   -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
@@ -85,21 +80,23 @@ docker run -d --name omni-npu \
   -v /usr/local/sbin:/usr/local/sbin:ro \
   -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
   -v "$MODEL_DIR:/model:ro" \
-  -e ASCEND_RT_VISIBLE_DEVICES=0,1,2,3 \
+  -e ASCEND_RT_VISIBLE_DEVICES=0 \
+  -e OMP_NUM_THREADS=8 -e HF_HUB_OFFLINE=1 \
   "$IMAGE" bash -lc '
     source /usr/local/Ascend/ascend-toolkit/set_env.sh
     exec sgl-omni serve \
-      --model-path /model --model-name ming-omni \
-      --text-only --thinker.tp_size 4 --thinker.gpu "[0,1,2,3]" \
-      --host 0.0.0.0 --port 8000
+      --model-path /model \
+      --config /workspace/sglang-omni/examples/configs/qwen3_tts_0_6b_customvoice_npu.yaml \
+      --host 127.0.0.1 --port 8000
   '
 
 docker logs -f omni-npu
 ```
 
-The CLI retains the name `gpu` for stage placement on NPU; these are logical
-indices within the visible devices. Text-only mode skips the talker. Wait for
-startup to complete, then check the API from another host terminal:
+When selecting another device, update both `/dev/davinci0` and
+`ASCEND_RT_VISIBLE_DEVICES`; keep `gpu: 0` in the model configuration, which
+refers to the first visible device. Wait for startup to complete, then check
+the API from another host terminal:
 
 ```bash
 curl --fail http://localhost:8000/v1/models
@@ -107,25 +104,28 @@ curl --fail http://localhost:8000/v1/models
 
 ## 4. Send a request
 
-Replace the message with your own prompt. The response text is in
-`choices[0].message.content`.
+Replace `input` with your own text. This example uses the built-in `Vivian`
+voice with Chinese; for English, use `language: "English"` and `voice: "Ryan"`.
+The response is saved as `speech.wav` on the client for playback.
 
 ```bash
-curl --fail http://localhost:8000/v1/chat/completions \
+curl --fail --show-error --max-time 600 http://localhost:8000/v1/audio/speech \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "ming-omni",
-    "messages": [{"role": "user", "content": "Explain tensor parallelism in one sentence."}],
-    "modalities": ["text"],
-    "max_tokens": 128,
-    "temperature": 0
-  }'
+    "input": "你好，欢迎使用语音合成服务。",
+    "language": "Chinese",
+    "voice": "Vivian",
+    "task_type": "CustomVoice",
+    "response_format": "wav",
+    "max_new_tokens": 256
+  }' --output speech.wav
 ```
 
-See the [Ming-Omni cookbook](../cookbook/ming_omni.md) for multimodal requests
-and speech configuration. Its CUDA device-selection examples must be adapted
-to NPU placement. Other models require their own supported NPU configuration;
-changing only the model directory is not sufficient.
+See the [Qwen3-TTS cookbook](../cookbook/qwen3_tts.md) for additional request
+options. Base and VoiceDesign checkpoints require their matching NPU
+configuration and request fields; changing only the model directory is not
+sufficient. For remote access, configure the service binding, authentication
+and network access controls before exposing the API.
 
 Stop and remove the container when finished; downloaded host weights remain:
 
