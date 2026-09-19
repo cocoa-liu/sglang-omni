@@ -1,11 +1,9 @@
 # syntax=docker/dockerfile:1.7
-# Ascend runtime: SGLang 0.5.19, CANN 9.0.0, Python 3.11,
-# torch/torch_npu 2.10.0, triton-ascend 3.2.1.dev20260530,
-# NPU kernel release 20260826 (wheel version 2026.6.1).
-# The digest pins the complete base dependency stack.
+# Base versions and digests are maintained in pyproject_npu.toml.
+# The selected digest pins the complete Ascend dependency stack.
 # Build from the repository root; source is installed from the build context.
-# Defaults to A3; pass the pinned 910b SGLANG_IMAGE for A2.
-ARG SGLANG_IMAGE=lmsysorg/sglang:v0.5.19-cann9.0.0-a3@sha256:55b9ca3b9f2bd67817054f51c55ff64603013f2b211535f77837ed47c3ae05d1
+# Pass SGLANG_IMAGE from scripts/npu/config.py --get base-image-a3 (or 910b).
+ARG SGLANG_IMAGE
 FROM ${SGLANG_IMAGE}
 
 ARG PIP_INDEX_URL=https://pypi.org/simple
@@ -29,7 +27,9 @@ RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation -r /tmp/
 
 COPY . /workspace/sglang-omni
 WORKDIR /workspace/sglang-omni
-RUN cp pyproject_npu.toml pyproject.toml \
+RUN python scripts/npu/config.py --check-installed \
+    && python scripts/npu/config.py --check \
+    && cp pyproject_npu.toml pyproject.toml \
     && python -m pip install --no-cache-dir --no-deps --no-build-isolation . \
     && cd / \
     && python -c "import sglang_omni; import librosa; import soundfile" \

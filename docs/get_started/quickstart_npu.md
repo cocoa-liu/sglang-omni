@@ -1,7 +1,7 @@
 # Quickstart — Ascend NPU
 
 Run SGLang-Omni in an ARM64 Ascend container. The image includes Omni source,
-SGLang 0.5.19, CANN 9.0.0, PyTorch / `torch_npu` 2.10 and common audio dependencies.
+the SGLang/CANN/PyTorch stack pinned by `pyproject_npu.toml`, and common audio dependencies.
 Model weights, host drivers and TorchCodec are not included. Model support on
 NPU and optional dependencies must be checked separately; the image does not
 enable every Omni model automatically.
@@ -30,15 +30,19 @@ cd sglang-omni
 
 # A3
 IMAGE=sglang-omni:npu-a3
-docker build -f docker/npu.Dockerfile -t "$IMAGE" .
+SGLANG_IMAGE=$(python3 scripts/npu/config.py --get base-image-a3)
+docker build -f docker/npu.Dockerfile \
+  --build-arg SGLANG_IMAGE="$SGLANG_IMAGE" -t "$IMAGE" .
 ```
 
-For A2 / 910B, replace the last two commands with:
+The configuration reader requires Python 3.11+, or Python 3.10 with `tomli`.
+For A2 / 910B, use these image-selection and build commands instead:
 
 ```bash
 IMAGE=sglang-omni:npu-910b
+SGLANG_IMAGE=$(python3 scripts/npu/config.py --get base-image-910b)
 docker build -f docker/npu.Dockerfile \
-  --build-arg SGLANG_IMAGE=lmsysorg/sglang:v0.5.19-cann9.0.0-910b@sha256:19beb175fe8b5a636a14c0f8a95aa92686a36e09b826f214be476b2ae22e7188 \
+  --build-arg SGLANG_IMAGE="$SGLANG_IMAGE" \
   -t "$IMAGE" .
 ```
 

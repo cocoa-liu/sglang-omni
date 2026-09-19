@@ -30,6 +30,19 @@ jobs:
       - name: Linting
         run: pre-commit run --all-files --show-diff-on-failure
 
+  npu-dependency-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check NPU configuration and installer without hardware
+        run: |
+          python -m pip install pytest==8.3.5 packaging==25.0
+          python scripts/npu/config.py --check
+          python -m pytest tests/unit_test/npu/test_npu_config.py tests/unit_test/npu/test_npu_install_script.py -q
+
   playback-test:
     runs-on: ubuntu-latest
     steps:

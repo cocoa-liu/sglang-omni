@@ -1,4 +1,6 @@
-# Runtime lock for docker/npu.Dockerfile (Python 3.11, SGLang 0.5.19).
+# Runtime lock for docker/npu.Dockerfile (Python 3.11).
+# Base versions are configured in pyproject_npu.toml; direct pins are checked
+# against its project.dependencies by scripts/npu/config.py --check.
 # Base packages, including their transitive dependencies, are frozen by the
 # SGLANG_IMAGE digest. List Omni's direct requirements and every added runtime
 # dependency here; install with --no-deps to preserve the Ascend stack.

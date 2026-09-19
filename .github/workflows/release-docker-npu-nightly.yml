@@ -7,6 +7,9 @@ on:
       - docker/npu.Dockerfile
       - docker/requirements-npu.txt
       - pyproject_npu.toml
+      - scripts/npu/config.py
+      - scripts/npu/install_npu.sh
+      - tests/unit_test/npu/**
       - .github/workflows/release-docker-npu.yml
       - .github/workflows/release-docker-npu-nightly.yml
   workflow_dispatch:

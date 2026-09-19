@@ -8,7 +8,7 @@ PYPROJECT="${REPO_ROOT}/pyproject.toml"
 PYPROJECT_NPU="${REPO_ROOT}/pyproject_npu.toml"
 BACKUP="${REPO_ROOT}/.pyproject.cuda.bak"
 LOCK="${REPO_ROOT}/.pyproject.npu.lock"
-SGLANG_SUPPORTED_RELEASE="0.5.18"
+SGLANG_SUPPORTED_RELEASE=""
 
 EDITABLE="-e"
 CHECK_ONLY=0
@@ -376,6 +376,7 @@ verify_install() {
 main() {
   parse_args "$@"
   configure_install
+  SGLANG_SUPPORTED_RELEASE="$("${PYBIN}" "${REPO_ROOT}/scripts/npu/config.py" --get sglang-version)"
   print_summary
   precheck
   acquire_lock
