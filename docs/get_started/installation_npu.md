@@ -10,30 +10,27 @@ selected by [`pyproject_npu.toml`](../../pyproject_npu.toml), and common audio
 dependencies. Model weights, host drivers and TorchCodec are not included.
 Model support on NPU and optional dependencies must be checked separately.
 
-### Prepare the image
+### Pull the image
 
 Use an ARM64 Linux host with Docker and Ascend A3 or A2 / 910B devices.
 Install compatible [host drivers and firmware](https://www.hiascend.com/hardware/firmware-drivers/community)
 and verify `npu-smi info` before starting.
 
-Until official images are published, build from the repository root. Choose the
-base image matching your hardware:
+Pull the image matching your hardware from
+[Docker Hub](https://hub.docker.com/r/lmsysorg/sglang-omni/tags):
 
 ```bash
-git clone https://github.com/sgl-project/sglang-omni.git
-cd sglang-omni
+# A3
+IMAGE=lmsysorg/sglang-omni:main-cann9.0.0-a3
 
-# A3; for A2 / 910B, use IMAGE=sglang-omni:npu-910b and --get base-image-910b.
-IMAGE=sglang-omni:npu-a3
-SGLANG_IMAGE=$(python3 scripts/npu/config.py --get base-image-a3)
-docker build -f docker/npu.Dockerfile \
-  --build-arg SGLANG_IMAGE="$SGLANG_IMAGE" -t "$IMAGE" .
+# For A2 / 910B, use this instead:
+# IMAGE=lmsysorg/sglang-omni:main-cann9.0.0-910b
+
+docker pull "$IMAGE"
 ```
 
-The configuration reader requires Python 3.11+, or Python 3.10 with `tomli`.
-If your operator provides a published image, set `IMAGE` to its matching
-registry reference and run `docker pull "$IMAGE"` instead. Use a tested digest
-for deployments. A successful build alone does not verify model inference.
+The `main-*` tags are rolling nightly builds. For reproducible deployments,
+set `IMAGE` to `lmsysorg/sglang-omni@sha256:<digest>`.
 
 ### Start the container
 
