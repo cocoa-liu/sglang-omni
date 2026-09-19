@@ -27,12 +27,11 @@ RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation -r /tmp/
 
 COPY . /workspace/sglang-omni
 WORKDIR /workspace/sglang-omni
-RUN python scripts/npu/config.py --check-installed \
-    && python scripts/npu/config.py --check \
-    && cp pyproject_npu.toml pyproject.toml \
-    && python -m pip install --no-cache-dir --no-deps --no-build-isolation . \
+RUN python scripts/npu/config.py --check \
+    && PIP_NO_CACHE_DIR=1 bash scripts/npu/install_npu.sh \
+        --no-editable --skip-device-check --no-deps --no-build-isolation \
     && cd / \
-    && python -c "import sglang_omni; import librosa; import soundfile" \
+    && python -c "import librosa; import soundfile" \
     && python -m pip freeze --all > /workspace/python-packages.txt \
     && dpkg-query -W > /workspace/system-packages.txt
 

@@ -17,6 +17,7 @@ EXTRAS=""
 TARGET="."
 PYBIN="${PYTHON:-python}"
 INSTALL_CMD=()
+PIP_ARGS=()
 
 usage() {
   cat <<'EOF'
@@ -28,7 +29,9 @@ are checked but never installed or modified by this script.
 Options:
   --extras NAME[,NAME]  Install eval, all, or fun-cosyvoice3 extras.
   --no-editable         Perform a non-editable installation.
-  --skip-device-check   Skip NPU availability and MatMul checks.
+  --no-deps             Use preinstalled dependencies without resolving them.
+  --no-build-isolation  Use preinstalled build dependencies.
+  --skip-device-check   Check package metadata only (no driver or NPU required).
   --check               Check prerequisites and show commands without installing.
   -h, --help            Show this help message.
 EOF
@@ -39,6 +42,10 @@ parse_args() {
     case "$1" in
       --no-editable)
         EDITABLE=""
+        shift
+        ;;
+      --no-deps|--no-build-isolation)
+        PIP_ARGS+=("$1")
         shift
         ;;
       --check)
@@ -93,6 +100,7 @@ configure_install() {
   fi
 
   INSTALL_CMD=("${PYBIN}" -m pip install)
+  INSTALL_CMD+=("${PIP_ARGS[@]}")
   [[ -n "${EDITABLE}" ]] && INSTALL_CMD+=("${EDITABLE}")
   INSTALL_CMD+=("${TARGET}")
 }
@@ -177,6 +185,31 @@ errors = []
 torch = None
 torch_npu = None
 
+# Image builds have no host driver libraries. Inspect installed distributions
+# without importing accelerator extensions in this mode.
+if os.environ["SGLANG_OMNI_SKIP_NPU_DEVICE_CHECK"] == "1":
+    versions = {}
+    for package in ("torch", "torch_npu", "triton-ascend", "sgl-kernel-npu"):
+        try:
+            versions[package] = version(package)
+            print(f"  {package}: {versions[package]}")
+        except PackageNotFoundError:
+            errors.append(f"{package} is not installed")
+    if "torch" in versions and "torch_npu" in versions:
+        torch_version = match(r"^(\d+)\.(\d+)", versions["torch"])
+        npu_version = match(r"^(\d+)\.(\d+)", versions["torch_npu"])
+        if (
+            torch_version is None
+            or npu_version is None
+            or torch_version.groups() != npu_version.groups()
+        ):
+            errors.append("torch and torch_npu must have matching major.minor versions")
+    if errors:
+        print("\nERROR: " + "; ".join(errors), file=sys.stderr)
+        sys.exit(1)
+    print("  NPU health: skipped (--skip-device-check; metadata only)")
+    sys.exit(0)
+
 try:
     import torch
 
@@ -236,23 +269,20 @@ if torch is not None and torch_npu is not None:
             "must have matching major.minor versions"
         )
 
-    if os.environ["SGLANG_OMNI_SKIP_NPU_DEVICE_CHECK"] == "1":
-        print("  NPU health:  skipped (--skip-device-check)")
-    else:
-        try:
-            if not torch.npu.is_available():
-                raise RuntimeError("torch.npu.is_available() returned False")
-            count = torch.npu.device_count()
-            if count < 1:
-                raise RuntimeError(f"torch.npu.device_count() returned {count}")
-            lhs = torch.tensor([[1.0, 2.0], [3.0, 4.0]], device="npu")
-            actual = (lhs @ lhs).cpu()
-            expected = torch.tensor([[7.0, 10.0], [15.0, 22.0]])
-            if not torch.equal(actual, expected):
-                raise RuntimeError(f"MatMul result mismatch: {actual}")
-            print(f"  NPU devices: {count}; MatMul: ok")
-        except Exception as exc:
-            errors.append(f"NPU health check failed: {exc}")
+    try:
+        if not torch.npu.is_available():
+            raise RuntimeError("torch.npu.is_available() returned False")
+        count = torch.npu.device_count()
+        if count < 1:
+            raise RuntimeError(f"torch.npu.device_count() returned {count}")
+        lhs = torch.tensor([[1.0, 2.0], [3.0, 4.0]], device="npu")
+        actual = (lhs @ lhs).cpu()
+        expected = torch.tensor([[7.0, 10.0], [15.0, 22.0]])
+        if not torch.equal(actual, expected):
+            raise RuntimeError(f"MatMul result mismatch: {actual}")
+        print(f"  NPU devices: {count}; MatMul: ok")
+    except Exception as exc:
+        errors.append(f"NPU health check failed: {exc}")
 
 if errors:
     print("\nERROR: NPU prerequisites are missing or incompatible.", file=sys.stderr)
@@ -358,10 +388,12 @@ verify_install() {
     echo "  [warn] sgl-omni not on PATH (check the environment's bin directory)"
   fi
 
-  if "${PYBIN}" -c "import sglang" >/dev/null 2>&1; then
+  if [[ "${SKIP_DEVICE_CHECK}" -eq 1 ]]; then
+    echo "  [skip] sglang runtime import (package version checked above)"
+  elif "${PYBIN}" -c "import sglang" >/dev/null 2>&1; then
     echo "  [ok] sglang is importable"
   else
-    echo "  [warn] sglang is not installed. Follow the Ascend NPU guide for"
+    echo "  [warn] sglang could not be imported. Follow the Ascend NPU guide for"
     echo "         a supported SGLang ${SGLANG_SUPPORTED_RELEASE} release-line installation:"
     echo "         https://docs.sglang.io/docs/hardware-platforms/ascend-npus/ascend_npu"
   fi

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import builtins
+import importlib.metadata
 import os
 import shlex
 import shutil
@@ -91,6 +93,59 @@ def test_install_uses_build_isolation_by_default(repo: Path) -> None:
 
     assert result.returncode == 0
     assert "--no-build-isolation" not in result.stdout
+    assert "--no-deps" not in result.stdout
+
+
+def test_image_install_preserves_pip_flags_and_restores_manifest(repo: Path) -> None:
+    result = _run(
+        repo,
+        "--no-editable",
+        "--skip-device-check",
+        "--no-deps",
+        "--no-build-isolation",
+    )
+
+    assert result.returncode == 0, result.stderr
+    command = next(
+        line for line in result.stdout.splitlines() if line.startswith(">>> ")
+    )
+    assert shlex.split(command[4:]) == [
+        str(repo / "fake python"),
+        "-m",
+        "pip",
+        "install",
+        "--no-deps",
+        "--no-build-isolation",
+        ".",
+    ]
+    assert (repo / "pyproject.toml").read_text().startswith(_ORIGINAL_MARKER)
+    assert not (repo / ".pyproject.cuda.bak").exists()
+
+
+@pytest.mark.parametrize("failure", [None, "missing", "mismatch"])
+def test_device_free_precheck_uses_metadata(monkeypatch, failure) -> None:
+    source = _SCRIPT.read_text().split("\"${PYBIN}\" - <<'PY'\n", 1)[1]
+    source = source.split("\nPY\n", 1)[0]
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        assert name not in {"torch", "torch_npu", "triton", "sgl_kernel_npu"}
+        return original_import(name, *args, **kwargs)
+
+    def version(package):
+        if package == "torch_npu":
+            if failure == "missing":
+                raise importlib.metadata.PackageNotFoundError(package)
+            if failure == "mismatch":
+                return "2.9.0"
+        return "2.10.0"
+
+    monkeypatch.setenv("SGLANG_OMNI_SKIP_NPU_DEVICE_CHECK", "1")
+    monkeypatch.setattr(importlib.metadata, "version", version)
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    with pytest.raises(SystemExit) as result:
+        exec(compile(source, str(_SCRIPT), "exec"), {})
+    assert result.value.code == (0 if failure is None else 1)
 
 
 @pytest.mark.parametrize(
