@@ -17,8 +17,8 @@ CONFIG, MATRIX = read_config(ROOT)
 @pytest.fixture
 def config_root(tmp_path):
     shutil.copy(ROOT / "pyproject_npu.toml", tmp_path)
-    (tmp_path / "docker").mkdir()
-    shutil.copy(ROOT / "docker/requirements-npu.txt", tmp_path / "docker")
+    (tmp_path / "scripts/npu").mkdir(parents=True)
+    shutil.copy(ROOT / "scripts/npu/requirements.txt", tmp_path / "scripts/npu")
     return tmp_path
 
 
@@ -50,7 +50,7 @@ def test_reject_inconsistent_base_images(config_root, old, new):
 
 @pytest.mark.parametrize("replacement", ["transformers==0.0.1", "transformers>=5", ""])
 def test_reject_incompatible_unpinned_or_missing_dependency(config_root, replacement):
-    path = config_root / "docker/requirements-npu.txt"
+    path = config_root / "scripts/npu/requirements.txt"
     path.write_text(
         re.sub(r"^transformers==[^\n]+", replacement, path.read_text(), flags=re.M)
     )

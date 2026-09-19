@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths:
       - docker/npu.Dockerfile
-      - docker/requirements-npu.txt
+      - scripts/npu/requirements.txt
       - pyproject_npu.toml
       - scripts/npu/config.py
       - scripts/npu/install_npu.sh

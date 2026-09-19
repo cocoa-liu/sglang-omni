@@ -30,6 +30,7 @@ def repo(tmp_path: Path) -> Path:
     shutil.copy(_SCRIPT.with_name("config.py"), root / "scripts" / "npu" / "config.py")
     (root / "pyproject.toml").write_text(f'{_ORIGINAL_MARKER}\n[project]\nname = "x"\n')
     shutil.copy("pyproject_npu.toml", root / "pyproject_npu.toml")
+    shutil.copy("scripts/npu/requirements.txt", root / "scripts/npu/requirements.txt")
 
     # A space in the executable path catches accidental shell word splitting.
     fake_python = root / "fake python"
@@ -88,12 +89,14 @@ def test_clean_dry_run_does_not_modify_manifest(repo: Path) -> None:
     assert not (repo / ".pyproject.cuda.bak").exists()
 
 
-def test_install_uses_build_isolation_by_default(repo: Path) -> None:
+def test_default_install_uses_shared_pins(repo: Path) -> None:
     result = _run(repo, "--check")
 
     assert result.returncode == 0
-    assert "--no-build-isolation" not in result.stdout
-    assert "--no-deps" not in result.stdout
+    assert "--no-build-isolation" in result.stdout
+    assert "--no-deps" in result.stdout
+    assert "scripts/npu/requirements.txt" in result.stdout
+    assert "apt-get" not in result.stdout
 
 
 def test_non_editable_install_restores_manifest(repo: Path) -> None:
@@ -112,10 +115,35 @@ def test_non_editable_install_restores_manifest(repo: Path) -> None:
         "-m",
         "pip",
         "install",
+        "--no-cache-dir",
+        "--no-build-isolation",
+        "--no-deps",
         ".",
     ]
     assert (repo / "pyproject.toml").read_text().startswith(_ORIGINAL_MARKER)
     assert not (repo / ".pyproject.cuda.bak").exists()
+
+
+def test_docker_dry_run_lists_dependencies_without_installing(repo: Path) -> None:
+    result = _run(
+        repo, "--install-system-deps", "--no-editable", "--skip-device-check", "--check"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "apt-get install -y --no-install-recommends ffmpeg=" in result.stdout
+    assert "libsndfile1=" in result.stdout
+    assert "sox=" in result.stdout
+    assert "scripts/npu/requirements.txt" in result.stdout
+    assert "editable:    no" in result.stdout
+    assert (repo / "pyproject.toml").read_text().startswith(_ORIGINAL_MARKER)
+
+
+def test_extras_use_shared_constraints(repo: Path) -> None:
+    result = _run(repo, "--extras", "eval", "--check")
+
+    assert result.returncode == 0, result.stderr
+    assert "--constraint" in result.stdout
+    assert "scripts/npu/requirements.txt" in result.stdout
 
 
 @pytest.mark.parametrize("failure", [None, "missing", "mismatch"])

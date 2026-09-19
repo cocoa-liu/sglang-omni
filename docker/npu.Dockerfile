@@ -7,31 +7,11 @@ ARG SGLANG_IMAGE
 FROM ${SGLANG_IMAGE}
 
 ARG PIP_INDEX_URL=https://pypi.org/simple
-ARG FFMPEG_VERSION=7:4.4.2-0ubuntu0.22.04.1
-ARG LIBSNDFILE_VERSION=1.0.31-2ubuntu0.2
-ARG SOX_VERSION=14.4.2+git20190427-2+deb11u2ubuntu0.22.04.1
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        ffmpeg=${FFMPEG_VERSION} \
-        libsndfile1=${LIBSNDFILE_VERSION} \
-        sox=${SOX_VERSION} \
-    && rm -rf /var/lib/apt/lists/*
-
-# Resolve no dependencies here: the lock includes additions to the pinned base.
-# In particular, qwen-tts metadata pins a different Transformers version; Omni's
-# compatibility layer supports the project's Transformers 5.12.1 instead.
-COPY docker/requirements-npu.txt /tmp/requirements-npu.txt
-RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation -r /tmp/requirements-npu.txt \
-    && rm /tmp/requirements-npu.txt
 
 COPY . /workspace/sglang-omni
 WORKDIR /workspace/sglang-omni
-RUN python scripts/npu/config.py --check \
-    && PIP_NO_CACHE_DIR=1 PIP_NO_DEPS=1 PIP_NO_BUILD_ISOLATION=0 \
-        bash scripts/npu/install_npu.sh --no-editable --skip-device-check \
-    && cd / \
-    && python -c "import librosa; import soundfile" \
+RUN bash scripts/npu/install_npu.sh \
+        --install-system-deps --no-editable --skip-device-check \
     && python -m pip freeze --all > /workspace/python-packages.txt \
     && dpkg-query -W > /workspace/system-packages.txt
 

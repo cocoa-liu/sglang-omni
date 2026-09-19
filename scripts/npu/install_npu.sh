@@ -12,20 +12,24 @@ SGLANG_SUPPORTED_RELEASE=""
 
 EDITABLE="-e"
 CHECK_ONLY=0
+INSTALL_SYSTEM_DEPS=0
 SKIP_DEVICE_CHECK=0
 EXTRAS=""
 TARGET="."
 PYBIN="${PYTHON:-python}"
 INSTALL_CMD=()
+REQUIREMENTS="${REPO_ROOT}/scripts/npu/requirements.txt"
+DEPENDENCY_CMD=("${PYBIN}" -m pip install --no-cache-dir --no-deps --no-build-isolation -r "${REQUIREMENTS}")
 
 usage() {
   cat <<'EOF'
 Usage: scripts/npu/install_npu.sh [OPTIONS]
 
 Install sglang-omni against an existing Ascend software stack. Prerequisites
-are checked but never installed or modified by this script.
+are checked before installing shared, pinned Python dependencies and Omni.
 
 Options:
+  --install-system-deps Install pinned FFmpeg, libsndfile and SoX (requires root).
   --extras NAME[,NAME]  Install eval, all, or fun-cosyvoice3 extras.
   --no-editable         Perform a non-editable installation.
   --skip-device-check   Check package metadata only (no driver or NPU required).
@@ -37,6 +41,10 @@ EOF
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --install-system-deps)
+        INSTALL_SYSTEM_DEPS=1
+        shift
+        ;;
       --no-editable)
         EDITABLE=""
         shift
@@ -92,7 +100,13 @@ configure_install() {
     TARGET=".[${EXTRAS}]"
   fi
 
-  INSTALL_CMD=("${PYBIN}" -m pip install)
+  INSTALL_CMD=("${PYBIN}" -m pip install --no-cache-dir --no-build-isolation)
+  if [[ -n "${EXTRAS}" ]]; then
+    # Resolve optional extras without changing the shared runtime pins.
+    INSTALL_CMD+=(--constraint "${REQUIREMENTS}")
+  else
+    INSTALL_CMD+=(--no-deps)
+  fi
   [[ -n "${EDITABLE}" ]] && INSTALL_CMD+=("${EDITABLE}")
   INSTALL_CMD+=("${TARGET}")
 }
@@ -103,6 +117,24 @@ print_summary() {
   echo "  python:      $("${PYBIN}" -c 'import sys; print(sys.executable)')"
   echo "  target:      ${TARGET}"
   echo "  editable:    $([[ -n "${EDITABLE}" ]] && echo yes || echo no)"
+}
+
+install_system_dependencies() {
+  local -a system_packages=(
+    "ffmpeg=${FFMPEG_VERSION:-7:4.4.2-0ubuntu0.22.04.1}"
+    "libsndfile1=${LIBSNDFILE_VERSION:-1.0.31-2ubuntu0.2}"
+    "sox=${SOX_VERSION:-14.4.2+git20190427-2+deb11u2ubuntu0.22.04.1}"
+  )
+  if [[ "${CHECK_ONLY}" -eq 1 ]]; then
+    echo "[--check] would install system dependencies:"
+    printf '%q ' apt-get install -y --no-install-recommends "${system_packages[@]}"
+    printf '\n'
+    return
+  fi
+  [[ "${EUID}" -eq 0 ]] || { echo "ERROR: --install-system-deps requires root" >&2; exit 1; }
+  apt-get update
+  apt-get install -y --no-install-recommends "${system_packages[@]}"
+  rm -rf /var/lib/apt/lists/*
 }
 
 check_sglang_version() {
@@ -406,13 +438,23 @@ main() {
   acquire_lock
   check_stale_backup
 
+  "${PYBIN}" "${REPO_ROOT}/scripts/npu/config.py" --check
+  if [[ "${INSTALL_SYSTEM_DEPS}" -eq 1 ]]; then
+    install_system_dependencies
+  fi
+
   if [[ "${CHECK_ONLY}" -eq 1 ]]; then
+    printf '[--check] would run: '
+    printf '%q ' "${DEPENDENCY_CMD[@]}"
+    printf '\n'
     show_dry_run
     return
   fi
 
+  "${DEPENDENCY_CMD[@]}"
   install_project
   verify_install
+  (cd / && "${PYBIN}" -c "import librosa; import soundfile")
 
   echo
   echo "=== done. Next: ==="
