@@ -19,18 +19,25 @@ and verify `npu-smi info` before starting.
 Pull the image matching your hardware from
 [Docker Hub](https://hub.docker.com/r/lmsysorg/sglang-omni/tags):
 
-```bash
-# A3
-IMAGE=lmsysorg/sglang-omni:main-cann9.0.0-a3
+- **Release:** use `v<version>-cann9.0.0-a3` for deployments, replacing
+  `v<version>` with a published version tag from Docker Hub.
+- **Development:** use `main-cann9.0.0-a3` for the latest published development
+  build. Scheduled or manual publications update this rolling tag.
 
-# For A2 / 910B, use this instead:
-# IMAGE=lmsysorg/sglang-omni:main-cann9.0.0-910b
+For A2 / 910B, replace the `a3` suffix with `910b`.
+
+```bash
+# Release (replace v<version> with a published version):
+# IMAGE=lmsysorg/sglang-omni:v<version>-cann9.0.0-a3
+
+# Development (A3):
+IMAGE=lmsysorg/sglang-omni:main-cann9.0.0-a3
 
 docker pull "$IMAGE"
 ```
 
-The `main-*` tags are rolling nightly builds. For reproducible deployments,
-set `IMAGE` to `lmsysorg/sglang-omni@sha256:<digest>`.
+For reproducible deployments, set `IMAGE` to
+`lmsysorg/sglang-omni@sha256:<digest>`.
 
 ### Start the container
 
