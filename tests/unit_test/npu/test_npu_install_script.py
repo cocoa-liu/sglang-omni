@@ -96,13 +96,11 @@ def test_install_uses_build_isolation_by_default(repo: Path) -> None:
     assert "--no-deps" not in result.stdout
 
 
-def test_image_install_preserves_pip_flags_and_restores_manifest(repo: Path) -> None:
+def test_non_editable_install_restores_manifest(repo: Path) -> None:
     result = _run(
         repo,
         "--no-editable",
         "--skip-device-check",
-        "--no-deps",
-        "--no-build-isolation",
     )
 
     assert result.returncode == 0, result.stderr
@@ -114,8 +112,6 @@ def test_image_install_preserves_pip_flags_and_restores_manifest(repo: Path) -> 
         "-m",
         "pip",
         "install",
-        "--no-deps",
-        "--no-build-isolation",
         ".",
     ]
     assert (repo / "pyproject.toml").read_text().startswith(_ORIGINAL_MARKER)

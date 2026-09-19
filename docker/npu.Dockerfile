@@ -28,8 +28,8 @@ RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation -r /tmp/
 COPY . /workspace/sglang-omni
 WORKDIR /workspace/sglang-omni
 RUN python scripts/npu/config.py --check \
-    && PIP_NO_CACHE_DIR=1 bash scripts/npu/install_npu.sh \
-        --no-editable --skip-device-check --no-deps --no-build-isolation \
+    && PIP_NO_CACHE_DIR=1 PIP_NO_DEPS=1 PIP_NO_BUILD_ISOLATION=0 \
+        bash scripts/npu/install_npu.sh --no-editable --skip-device-check \
     && cd / \
     && python -c "import librosa; import soundfile" \
     && python -m pip freeze --all > /workspace/python-packages.txt \

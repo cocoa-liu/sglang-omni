@@ -17,7 +17,6 @@ EXTRAS=""
 TARGET="."
 PYBIN="${PYTHON:-python}"
 INSTALL_CMD=()
-PIP_ARGS=()
 
 usage() {
   cat <<'EOF'
@@ -29,8 +28,6 @@ are checked but never installed or modified by this script.
 Options:
   --extras NAME[,NAME]  Install eval, all, or fun-cosyvoice3 extras.
   --no-editable         Perform a non-editable installation.
-  --no-deps             Use preinstalled dependencies without resolving them.
-  --no-build-isolation  Use preinstalled build dependencies.
   --skip-device-check   Check package metadata only (no driver or NPU required).
   --check               Check prerequisites and show commands without installing.
   -h, --help            Show this help message.
@@ -42,10 +39,6 @@ parse_args() {
     case "$1" in
       --no-editable)
         EDITABLE=""
-        shift
-        ;;
-      --no-deps|--no-build-isolation)
-        PIP_ARGS+=("$1")
         shift
         ;;
       --check)
@@ -100,7 +93,6 @@ configure_install() {
   fi
 
   INSTALL_CMD=("${PYBIN}" -m pip install)
-  INSTALL_CMD+=("${PIP_ARGS[@]}")
   [[ -n "${EDITABLE}" ]] && INSTALL_CMD+=("${EDITABLE}")
   INSTALL_CMD+=("${TARGET}")
 }
