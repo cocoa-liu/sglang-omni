@@ -1,20 +1,32 @@
-# Installation — Ascend NPU
+# 🚀 Installation — Ascend
 
-Choose Docker for a preinstalled runtime, or install from source into an existing
-Ascend environment. Both methods require compatible host drivers and firmware.
+## Prerequisites
 
-## Option 1: Docker
+Both installation methods require Ascend host drivers and firmware compatible
+with your hardware and selected CANN release. Follow the
+[HDK driver and firmware installation guide](https://www.hiascend.com/hardware/firmware-drivers/community)
+and the [Ascend software compatibility guide](https://docs.sglang.io/docs/hardware-platforms/ascend-npus/ascend_npu)
+to select and install matching versions. For Docker, match the CANN version in
+the image tag.
+
+Verify the host installation before continuing:
+
+```bash
+npu-smi info
+```
+
+## 🐳 Option A: Docker (recommended)
 
 The ARM64 image includes SGLang-Omni source, the SGLang/CANN/PyTorch runtime
 selected by [`pyproject_npu.toml`](../../pyproject_npu.toml), and common audio
 dependencies. Model weights, host drivers and TorchCodec are not included.
 Model support on NPU and optional dependencies must be checked separately.
 
-### Pull the image
+### A3 image installation
 
-Use an ARM64 Linux host with Docker and Ascend A3 or A2 / 910B devices.
-Install compatible [host drivers and firmware](https://www.hiascend.com/hardware/firmware-drivers/community)
-and verify `npu-smi info` before starting.
+Use an ARM64 Linux host with Docker and Ascend A3 devices.
+
+**1. Pull the image**
 
 Pull the image matching your hardware from
 [Docker Hub](https://hub.docker.com/r/lmsysorg/sglang-omni/tags):
@@ -23,8 +35,6 @@ Pull the image matching your hardware from
   `v<version>` with a published version tag from Docker Hub.
 - **Development:** use `main-cann9.0.0-a3` for the latest published development
   build. Scheduled or manual publications update this rolling tag.
-
-For A2 / 910B, replace the `a3` suffix with `910b`.
 
 ```bash
 # Release (replace v<version> with a published version):
@@ -39,7 +49,7 @@ docker pull "$IMAGE"
 For reproducible deployments, set `IMAGE` to
 `lmsysorg/sglang-omni@sha256:<digest>`.
 
-### Start the container
+**2. Start the container**
 
 Download your model weights into a host directory and mount it into the
 container. The example exposes device 0; adjust device IDs and driver paths
@@ -47,7 +57,7 @@ for your host. `--privileged` grants broad host access and is only suitable for
 a trusted host; production deployments should use restricted device access.
 
 ```bash
-MODEL_DIR=/mnt/models
+MODEL_DIR=<your_own_path>
 docker run --rm -it --name omni-npu \
   --privileged --network host --shm-size 8g \
   --device /dev/davinci0 \
@@ -70,6 +80,63 @@ When selecting another device, update both `/dev/davinci0` and
 `ASCEND_RT_VISIBLE_DEVICES`. Device indices in the pipeline configuration are
 relative to the visible devices (`gpu: 0` selects the first visible device).
 
+<details>
+<summary>A2 image installation details (click)</summary>
+
+Use an ARM64 Linux host with Docker and Ascend A2 / 910B devices.
+
+**1. Pull the image**
+
+Use `v<version>-cann9.0.0-910b` for a release, or
+`main-cann9.0.0-910b` for the latest published development build.
+
+```bash
+# Release (replace v<version> with a published version):
+# IMAGE=lmsysorg/sglang-omni:v<version>-cann9.0.0-910b
+
+# Development (A2 / 910B):
+IMAGE=lmsysorg/sglang-omni:main-cann9.0.0-910b
+
+docker pull "$IMAGE"
+```
+
+For reproducible deployments, set `IMAGE` to
+`lmsysorg/sglang-omni@sha256:<digest>`.
+
+**2. Start the container**
+
+Set `MODEL_DIR` to your model directory. The example exposes device 0;
+adjust device IDs and driver paths for your host. Use `--privileged` only
+on a trusted host; production deployments should use restricted device access.
+
+```bash
+MODEL_DIR=<your_own_path>
+docker run --rm -it --name omni-npu \
+  --privileged --network host --shm-size 8g \
+  --device /dev/davinci0 \
+  --device /dev/davinci_manager \
+  --device /dev/devmm_svm --device /dev/hisi_hdc \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+  -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
+  -v /usr/local/sbin:/usr/local/sbin:ro \
+  -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
+  -v "$MODEL_DIR:/models:ro" \
+  -e ASCEND_RT_VISIBLE_DEVICES=0 \
+  -e OMP_NUM_THREADS=8 \
+  "$IMAGE" bash
+
+# Inside the container:
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+```
+
+When selecting another device, update both `/dev/davinci0` and
+`ASCEND_RT_VISIBLE_DEVICES`. Pipeline device indices are relative to the
+visible devices (`gpu: 0` selects the first visible device).
+
+</details>
+
+### Launch the server
+
 The runtime is already installed. Skip the source installation below and do
 not run the TorchCodec stack-upgrade script inside this image.
 Continue with the [API Server Quickstart](apiserver_quickstart.md) to launch
@@ -79,7 +146,7 @@ required. Model-specific inputs belong in the corresponding cookbook, such as
 the [Qwen3-TTS guide](../cookbook/qwen3_tts.md); GPU-specific configurations
 there should not be assumed to work unchanged on NPU.
 
-## Option 2: Install from source
+## 🛠️ Option B: Manual install
 
 Install the Ascend software stack and NPU build of SGLang before installing
 `sglang-omni`. The helper script
@@ -98,7 +165,6 @@ linked documentation. Python 3.11 is the verified configuration.
 | Component | Version | Required | Manual installation | Installation |
 |-----------|---------|----------|---------------------|--------------|
 | CANN toolkit | Compatible release | Yes | Yes | [Official documentation](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/900/softwareinst/instg/instg_0008.html) |
-| HDK (driver and firmware) | Match the hardware and CANN release | Yes | Yes | [Official documentation](https://www.hiascend.com/hardware/firmware-drivers/community) |
 | PyTorch and `torch_npu` | Matching releases | Yes | Yes | [Official documentation](https://www.hiascend.com/developer/software/ai-frameworks/pytorch/download?versionId=177&ids=89dda9ba9de741349efa03687a487678%2C204%2C200%2C1%2C6%2C177%2C) |
 | `triton-ascend` | Match the selected PyTorch and CANN releases | Yes | Yes | [Official documentation](https://gitcode.com/Ascend/triton-ascend/blob/main/docs/en/quick_start.md) |
 | `sgl-kernel-npu` | Match PyTorch, Python, CANN, hardware, and architecture | Yes | Yes | [Official documentation](https://github.com/sgl-project/sgl-kernel-npu/releases) |
