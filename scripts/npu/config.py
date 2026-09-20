@@ -38,41 +38,6 @@ def read_config(root: Path = ROOT) -> tuple[dict, list[dict]]:
     return config, matrix
 
 
-def check_requirements(root: Path = ROOT) -> None:
-    """Check direct runtime requirements against the shared NPU pins."""
-    from packaging.requirements import Requirement
-    from packaging.utils import canonicalize_name
-
-    manifest = tomllib.loads((root / "pyproject_npu.toml").read_text())
-    pins = {}
-    for line in (root / "scripts/npu/requirements.txt").read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        requirement = Requirement(line)
-        specs = list(requirement.specifier)
-        if len(specs) != 1 or specs[0].operator != "==" or "*" in specs[0].version:
-            raise ValueError(f"NPU requirement must be exactly pinned: {line}")
-        name = canonicalize_name(requirement.name)
-        if name in pins:
-            raise ValueError(f"Duplicate NPU requirement: {name}")
-        pins[name] = specs[0].version
-    for text in manifest["project"]["dependencies"]:
-        requirement = Requirement(text)
-        if requirement.marker and not requirement.marker.evaluate(
-            {
-                "sys_platform": "linux",
-                "platform_machine": "aarch64",
-                "python_version": "3.11",
-                "python_full_version": "3.11.0",
-            }
-        ):
-            continue
-        pin = pins.get(canonicalize_name(requirement.name))
-        if pin is None or not requirement.specifier.contains(pin, prereleases=True):
-            raise ValueError(f"NPU pins do not satisfy {text}: {pin}")
-
-
 def check_installed(config: dict) -> None:
     """Verify the actual base image version, not just its tag spelling."""
     from importlib.metadata import version
@@ -101,8 +66,7 @@ def main() -> None:
     elif args.matrix:
         print(json.dumps({"include": matrix}))
     elif args.check:
-        check_requirements()
-        print("NPU image configuration and direct dependency pins are consistent")
+        print("NPU image configuration is consistent")
     else:
         check_installed(config)
 

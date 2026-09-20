@@ -18,15 +18,13 @@ EXTRAS=""
 TARGET="."
 PYBIN="${PYTHON:-python}"
 INSTALL_CMD=()
-REQUIREMENTS="${REPO_ROOT}/scripts/npu/requirements.txt"
-DEPENDENCY_CMD=("${PYBIN}" -m pip install --no-cache-dir --no-deps --no-build-isolation -r "${REQUIREMENTS}")
 
 usage() {
   cat <<'EOF'
 Usage: scripts/npu/install_npu.sh [OPTIONS]
 
 Install sglang-omni against an existing Ascend software stack. Prerequisites
-are checked before installing shared, pinned Python dependencies and Omni.
+are checked before installing Omni and its declared Python dependencies.
 
 Options:
   --install-system-deps Install pinned FFmpeg, libsndfile and SoX (requires root).
@@ -100,13 +98,7 @@ configure_install() {
     TARGET=".[${EXTRAS}]"
   fi
 
-  INSTALL_CMD=("${PYBIN}" -m pip install --no-cache-dir --no-build-isolation)
-  if [[ -n "${EXTRAS}" ]]; then
-    # Resolve optional extras without changing the shared runtime pins.
-    INSTALL_CMD+=(--constraint "${REQUIREMENTS}")
-  else
-    INSTALL_CMD+=(--no-deps)
-  fi
+  INSTALL_CMD=("${PYBIN}" -m pip install)
   [[ -n "${EDITABLE}" ]] && INSTALL_CMD+=("${EDITABLE}")
   INSTALL_CMD+=("${TARGET}")
 }
@@ -444,14 +436,10 @@ main() {
   fi
 
   if [[ "${CHECK_ONLY}" -eq 1 ]]; then
-    printf '[--check] would run: '
-    printf '%q ' "${DEPENDENCY_CMD[@]}"
-    printf '\n'
     show_dry_run
     return
   fi
 
-  "${DEPENDENCY_CMD[@]}"
   install_project
   verify_install
   (cd / && "${PYBIN}" -c "import librosa; import soundfile")

@@ -71,7 +71,7 @@ dependencies = [
     "openai==2.6.1",
     "openai-harmony==0.0.4",
     # /v1/realtime — server-side VAD
-    "silero-vad>=5.1",
+    "silero-vad==6.2.1",  # 6.2.2 requires torchaudio<2.10, downgrading the NPU stack
     "onnxruntime>=1.17",
 
     # --- Multimodal preprocessing (needed by Qwen3-Omni/ASR/TTS) ------------

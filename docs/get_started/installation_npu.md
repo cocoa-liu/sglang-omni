@@ -84,10 +84,9 @@ there should not be assumed to work unchanged on NPU.
 Install the Ascend software stack and NPU build of SGLang before installing
 `sglang-omni`. The helper script
 [`install_npu.sh`](../../scripts/npu/install_npu.sh) installs only
-`sglang-omni` and the shared Python dependencies in
-[`scripts/npu/requirements.txt`](../../scripts/npu/requirements.txt), using the
-same installation flow as Docker. Use a dedicated Python 3.11 environment:
-installation may replace existing packages with the pinned versions. Prepare
+`sglang-omni` and the Python dependencies declared in
+[`pyproject_npu.toml`](../../pyproject_npu.toml), using the
+same installation flow as Docker. Prepare
 FFmpeg, libsndfile and SoX separately, or pass `--install-system-deps` as root.
 The Ascend software stack and SGLang must already be installed.
 
