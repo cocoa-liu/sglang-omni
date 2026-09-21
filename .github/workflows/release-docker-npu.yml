@@ -73,11 +73,6 @@ jobs:
     needs: preprocess
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 120
-    outputs:
-      digest_a3: ${{ steps.digest.outputs.digest_a3 }}
-      digest_910b: ${{ steps.digest.outputs.digest_910b }}
-      tags_a3: ${{ steps.digest.outputs.tags_a3 }}
-      tags_910b: ${{ steps.digest.outputs.tags_910b }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.preprocess.outputs.matrix) }}
@@ -105,7 +100,7 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Build ARM64 image
+      - name: Build and publish ARM64 image
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -115,60 +110,21 @@ jobs:
           build-args: |
             SGLANG_IMAGE=${{ matrix.base_image }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=lmsysorg/sglang-omni,push-by-digest=true,name-canonical=true,push=${{ needs.preprocess.outputs.publish }}
+          tags: ${{ steps.meta.outputs.tags }}
+          push: ${{ needs.preprocess.outputs.publish == 'true' }}
           provenance: false
           cache-from: type=gha,scope=npu-${{ matrix.device }}
           cache-to: type=gha,mode=max,scope=npu-${{ matrix.device }}
-      - name: Export image digest and tags
-        id: digest
+      - name: Record published image
         if: needs.preprocess.outputs.publish == 'true'
         env:
+          IMAGE: lmsysorg/sglang-omni
           DIGEST: ${{ steps.build.outputs.digest }}
           DEVICE: ${{ matrix.device }}
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ -n "$TAGS" ]]
-          {
-            echo "digest_${DEVICE}=$DIGEST"
-            echo "tags_${DEVICE}<<EOF"
-            printf '%s\n' "$TAGS"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
-  publish:
-    needs: [preprocess, build_arm64]
-    if: needs.preprocess.outputs.publish == 'true'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.preprocess.outputs.matrix) }}
-    steps:
-      - uses: docker/setup-buildx-action@v3
-      - name: Log into Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Publish image tags
-        env:
-          IMAGE: lmsysorg/sglang-omni
-          DEVICE: ${{ matrix.device }}
-          DIGEST: ${{ needs.build_arm64.outputs[format('digest_{0}', matrix.device)] }}
-          TAGS: ${{ needs.build_arm64.outputs[format('tags_{0}', matrix.device)] }}
-        run: |
-          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ -n "$TAGS" ]]
-          mapfile -t tags <<< "$TAGS"
-          tag_args=()
-          for tag in "${tags[@]}"; do
-            tag_args+=(--tag "$tag")
-          done
-          # A3 and 910B are separate hardware images, not a multi-arch image.
-          docker buildx imagetools create --prefer-index=false \
-            "${tag_args[@]}" "$IMAGE@$DIGEST"
           {
             echo "### NPU image: $DEVICE"
             echo "Image: $IMAGE@$DIGEST"
-            printf 'Published: %s\n' "${tags[@]}"
+            printf 'Published tags:\n%s\n' "$TAGS"
           } >> "$GITHUB_STEP_SUMMARY"
