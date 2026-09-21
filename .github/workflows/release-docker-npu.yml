@@ -69,7 +69,7 @@ jobs:
           matrix=$(python scripts/npu/config.py --matrix)
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
-  build_arm64:
+  build_and_publish_arm64:
     needs: preprocess
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 120
