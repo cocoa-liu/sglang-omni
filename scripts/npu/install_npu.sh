@@ -13,6 +13,7 @@ SGLANG_SUPPORTED_RELEASE=""
 EDITABLE="-e"
 CHECK_ONLY=0
 INSTALL_SYSTEM_DEPS=0
+WITH_QWEN_TTS=0
 SKIP_DEVICE_CHECK=0
 EXTRAS=""
 TARGET="."
@@ -28,6 +29,7 @@ are checked before installing Omni and its declared Python dependencies.
 
 Options:
   --install-system-deps Install pinned FFmpeg, libsndfile and SoX (requires root).
+  --with-qwen-tts       Install the Qwen3-TTS package without replacing core dependencies.
   --extras NAME[,NAME]  Install eval, all, or fun-cosyvoice3 extras.
   --no-editable         Perform a non-editable installation.
   --skip-device-check   Check package metadata only (no driver or NPU required).
@@ -41,6 +43,10 @@ parse_args() {
     case "$1" in
       --install-system-deps)
         INSTALL_SYSTEM_DEPS=1
+        shift
+        ;;
+      --with-qwen-tts)
+        WITH_QWEN_TTS=1
         shift
         ;;
       --no-editable)
@@ -421,6 +427,16 @@ verify_install() {
   fi
 }
 
+install_qwen_tts() {
+  # qwen-tts pins Transformers 4.57.3; retain Omni's Transformers version.
+  local -a command=("${PYBIN}" -m pip install --no-deps "qwen-tts==0.1.1")
+  printf '%q ' "${command[@]}"
+  printf '\n'
+  if [[ "${CHECK_ONLY}" -eq 0 ]]; then
+    "${command[@]}"
+  fi
+}
+
 main() {
   parse_args "$@"
   configure_install
@@ -437,10 +453,16 @@ main() {
 
   if [[ "${CHECK_ONLY}" -eq 1 ]]; then
     show_dry_run
+    if [[ "${WITH_QWEN_TTS}" -eq 1 ]]; then
+      install_qwen_tts
+    fi
     return
   fi
 
   install_project
+  if [[ "${WITH_QWEN_TTS}" -eq 1 ]]; then
+    install_qwen_tts
+  fi
   verify_install
   (cd / && "${PYBIN}" -c "import librosa; import soundfile")
 

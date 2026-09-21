@@ -139,6 +139,7 @@ visible devices (`gpu: 0` selects the first visible device).
 
 The runtime is already installed. Skip the source installation below and do
 not run the TorchCodec stack-upgrade script inside this image.
+Qwen3-TTS dependencies are included; skip its cookbook's dependency installation.
 Continue with the [API Server Quickstart](apiserver_quickstart.md) to launch
 `sgl-omni serve` and send requests. Use the container model path under `/models`
 and pass the selected model's NPU pipeline configuration with `--config` when

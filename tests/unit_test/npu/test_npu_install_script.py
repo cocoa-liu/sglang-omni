@@ -121,13 +121,19 @@ def test_non_editable_install_restores_manifest(repo: Path) -> None:
 
 def test_docker_dry_run_lists_dependencies_without_installing(repo: Path) -> None:
     result = _run(
-        repo, "--install-system-deps", "--no-editable", "--skip-device-check", "--check"
+        repo,
+        "--install-system-deps",
+        "--with-qwen-tts",
+        "--no-editable",
+        "--skip-device-check",
+        "--check",
     )
 
     assert result.returncode == 0, result.stderr
     assert "apt-get install -y --no-install-recommends ffmpeg=" in result.stdout
     assert "libsndfile1=" in result.stdout
     assert "sox=" in result.stdout
+    assert "-m pip install --no-deps qwen-tts==0.1.1" in result.stdout
     assert "editable:    no" in result.stdout
     assert (repo / "pyproject.toml").read_text().startswith(_ORIGINAL_MARKER)
 

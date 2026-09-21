@@ -11,7 +11,7 @@ ARG PIP_INDEX_URL=https://pypi.org/simple
 COPY . /workspace/sglang-omni
 WORKDIR /workspace/sglang-omni
 RUN bash scripts/npu/install_npu.sh \
-        --install-system-deps --no-editable --skip-device-check \
+        --install-system-deps --with-qwen-tts --no-editable --skip-device-check \
     && python -m pip freeze --all > /workspace/python-packages.txt \
     && dpkg-query -W > /workspace/system-packages.txt
 
