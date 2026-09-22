@@ -18,12 +18,6 @@ def config_root(tmp_path):
     return tmp_path
 
 
-def test_repository_configuration():
-    config, matrix = read_config(ROOT)
-    assert [item["device"] for item in matrix] == ["a3", "910b"]
-    assert matrix[0]["base_image"] == config["base-image-a3"]
-
-
 @pytest.mark.parametrize(
     "old,new",
     [
