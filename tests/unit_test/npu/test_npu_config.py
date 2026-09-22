@@ -27,7 +27,7 @@ def config_root(tmp_path):
         ),
         (f'cann{MATRIX[1]["cann"]}-910b', "cann99.0.0-910b"),
         ("-a3@sha256:", "-910b@sha256:"),
-        ("@sha256:", "@invalid:"),
+        (CONFIG["base-image-a3"], CONFIG["base-image-a3"].split("@", 1)[0]),
     ],
 )
 def test_reject_inconsistent_base_images(config_root, old, new):
