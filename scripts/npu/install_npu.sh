@@ -195,6 +195,12 @@ import sys
 from importlib.metadata import PackageNotFoundError, version
 from re import match
 
+
+def major_minor(value: str) -> tuple[str, str] | None:
+    parsed = match(r"^(\d+)\.(\d+)", value)
+    return parsed.groups() if parsed else None
+
+
 ASCEND_PYTORCH_URL = (
     "https://www.hiascend.com/developer/software/ai-frameworks/pytorch/download"
 )
@@ -218,12 +224,12 @@ if os.environ["SGLANG_OMNI_SKIP_NPU_DEVICE_CHECK"] == "1":
         except PackageNotFoundError:
             errors.append(f"{package} is not installed")
     if "torch" in versions and "torch_npu" in versions:
-        torch_version = match(r"^(\d+)\.(\d+)", versions["torch"])
-        npu_version = match(r"^(\d+)\.(\d+)", versions["torch_npu"])
+        torch_version = major_minor(versions["torch"])
+        npu_version = major_minor(versions["torch_npu"])
         if (
             torch_version is None
             or npu_version is None
-            or torch_version.groups() != npu_version.groups()
+            or torch_version != npu_version
         ):
             errors.append("torch and torch_npu must have matching major.minor versions")
     if errors:
@@ -281,10 +287,6 @@ except ImportError:
     )
 
 if torch is not None and torch_npu is not None:
-    def major_minor(value):
-        parsed = match(r"^(\d+)\.(\d+)", value)
-        return parsed.groups() if parsed else None
-
     if major_minor(torch.__version__) != major_minor(torch_npu.__version__):
         errors.append(
             f"torch {torch.__version__} and torch_npu {torch_npu.__version__} "
