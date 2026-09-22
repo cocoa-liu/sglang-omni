@@ -17,5 +17,4 @@ RUN bash scripts/npu/install_npu.sh \
 
 # Qwen3-TTS audio input uses Omni's SoundFile fallback when TorchCodec is absent.
 # Do not pull an incompatible CUDA-linked TorchCodec wheel into this CPU torch base.
-ENTRYPOINT []
 CMD ["/bin/bash"]
