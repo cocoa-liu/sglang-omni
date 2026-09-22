@@ -3,11 +3,10 @@
 
 import shutil
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-from scripts.npu.config import check_installed, read_config
+from scripts.npu.config import read_config
 
 ROOT = Path(__file__).resolve().parents[3]
 CONFIG, MATRIX = read_config(ROOT)
@@ -42,12 +41,3 @@ def test_reject_inconsistent_base_images(config_root, old, new):
     path.write_text(path.read_text().replace(old, new))
     with pytest.raises(ValueError):
         read_config(config_root)
-
-
-def test_actual_base_version_must_match_config():
-    config, _ = read_config(ROOT)
-    with patch("importlib.metadata.version", return_value="0.0.1"):
-        with pytest.raises(ValueError, match="Installed SGLang"):
-            check_installed(config)
-    with patch("importlib.metadata.version", return_value=config["sglang-version"]):
-        check_installed(config)

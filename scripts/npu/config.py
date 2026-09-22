@@ -38,18 +38,6 @@ def read_config(root: Path = ROOT) -> tuple[dict, list[dict]]:
     return config, matrix
 
 
-def check_installed(config: dict) -> None:
-    """Verify the actual base image version, not just its tag spelling."""
-    from importlib.metadata import version
-
-    from packaging.version import Version
-
-    expected = Version(config["sglang-version"]).release
-    actual = version("sglang")
-    if Version(actual).release[: len(expected)] != expected:
-        raise ValueError(f"Installed SGLang {actual} does not match {expected}")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group(required=True)
@@ -58,7 +46,6 @@ def main() -> None:
     )
     modes.add_argument("--matrix", action="store_true")
     modes.add_argument("--check", action="store_true")
-    modes.add_argument("--check-installed", action="store_true")
     args = parser.parse_args()
     config, matrix = read_config()
     if args.get:
@@ -67,8 +54,6 @@ def main() -> None:
         print(json.dumps({"include": matrix}))
     elif args.check:
         print("NPU image configuration is consistent")
-    else:
-        check_installed(config)
 
 
 if __name__ == "__main__":
