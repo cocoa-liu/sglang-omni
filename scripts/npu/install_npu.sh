@@ -448,7 +448,6 @@ main() {
   acquire_lock
   check_stale_backup
 
-  "${PYBIN}" "${REPO_ROOT}/scripts/npu/config.py" --check
   if [[ "${INSTALL_SYSTEM_DEPS}" -eq 1 ]]; then
     install_system_dependencies
   fi

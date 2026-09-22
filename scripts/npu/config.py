@@ -45,15 +45,12 @@ def main() -> None:
         "--get", choices=["sglang-version", "base-image-a3", "base-image-910b"]
     )
     modes.add_argument("--matrix", action="store_true")
-    modes.add_argument("--check", action="store_true")
     args = parser.parse_args()
     config, matrix = read_config()
     if args.get:
         print(config[args.get])
     elif args.matrix:
         print(json.dumps({"include": matrix}))
-    elif args.check:
-        print("NPU image configuration is consistent")
 
 
 if __name__ == "__main__":

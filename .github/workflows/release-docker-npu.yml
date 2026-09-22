@@ -61,7 +61,6 @@ jobs:
       - name: Check NPU configuration and installer without hardware
         run: |
           python -m pip install pytest==8.3.5 packaging==25.0
-          python scripts/npu/config.py --check
           python -m pytest tests/unit_test/npu/test_npu_config.py tests/unit_test/npu/test_npu_install_script.py -q
       - name: Read shared NPU configuration
         id: config
