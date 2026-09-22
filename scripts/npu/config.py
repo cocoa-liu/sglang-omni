@@ -32,7 +32,7 @@ def read_config(root: Path = ROOT) -> tuple[dict, list[dict]]:
             raise ValueError(
                 f"base-image-{device} must pin SGLang {version}, {device} and a digest"
             )
-        matrix.append({"device": device, "base_image": image, "cann": match[1]})
+        matrix.append({"device": device, "cann": match[1]})
     if matrix[0]["cann"] != matrix[1]["cann"]:
         raise ValueError("A3 and 910B must use the same CANN release")
     return config, matrix

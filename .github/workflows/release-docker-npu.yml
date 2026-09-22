@@ -36,6 +36,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.config.outputs.matrix }}
+      base_image_a3: ${{ steps.config.outputs.base_image_a3 }}
+      base_image_910b: ${{ steps.config.outputs.base_image_910b }}
       publish: ${{ steps.publication.outputs.publish }}
     steps:
       # Reuse the standard Docker Hub secrets used by SGLang's lmsysorg releases.
@@ -66,7 +68,11 @@ jobs:
         id: config
         run: |
           matrix=$(python scripts/npu/config.py --matrix)
+          base_image_a3=$(python scripts/npu/config.py --get base-image-a3)
+          base_image_910b=$(python scripts/npu/config.py --get base-image-910b)
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "base_image_a3=$base_image_a3" >> "$GITHUB_OUTPUT"
+          echo "base_image_910b=$base_image_910b" >> "$GITHUB_OUTPUT"
 
   build_and_publish_arm64:
     needs: preprocess
@@ -107,7 +113,7 @@ jobs:
           file: docker/npu.Dockerfile
           platforms: linux/arm64
           build-args: |
-            SGLANG_IMAGE=${{ matrix.base_image }}
+            SGLANG_IMAGE=${{ matrix.device == 'a3' && needs.preprocess.outputs.base_image_a3 || needs.preprocess.outputs.base_image_910b }}
           labels: ${{ steps.meta.outputs.labels }}
           tags: ${{ steps.meta.outputs.tags }}
           push: ${{ needs.preprocess.outputs.publish == 'true' }}
