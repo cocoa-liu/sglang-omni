@@ -483,6 +483,8 @@ def test_qwen3_tts_npu_configs_use_sdpa_with_selected_graph_mode(
     assert stages["tts_engine"].engine.max_queued_requests == 8
     assert stages["tts_engine"].engine.mem_fraction_static == mem_fraction_static
     assert stages["vocoder"].factory.attn_implementation == "sdpa"
+    if model_suffix == "1.7B-Base":
+        assert stages["vocoder"].factory.stream_chunk_ramp == [1, 2, 2, 2, 4, 4]
 
 
 def test_qwen3_tts_0_6b_base_npu_config_uses_eager_concurrency() -> None:
@@ -4282,11 +4284,14 @@ def test_qwen3_tts_streaming_vocoder_uses_steady_followup_stride() -> None:
     assert len(scheduler._decoder.decode_inputs) == 2
 
 
-def test_qwen3_tts_streaming_vocoder_chunk_ramp_schedules_early_chunks() -> None:
+@pytest.mark.parametrize("ramp", [(2, 4, 8), (1, 2, 2, 2, 4, 4)])
+def test_qwen3_tts_streaming_vocoder_chunk_ramp_schedules_early_chunks(
+    ramp: tuple[int, ...],
+) -> None:
     scheduler = Qwen3TTSStreamingVocoderScheduler(
         _FakeQwen3TTSTokenizer(),
         device="cpu",
-        stream_chunk_ramp=(2, 4, 8),
+        stream_chunk_ramp=ramp,
     )
     payload = make_payload(inputs="target", params={"stream": True})
     scheduler.handle_streaming_new_request(payload.request_id, payload)
@@ -4311,20 +4316,14 @@ def test_qwen3_tts_streaming_vocoder_chunk_ramp_schedules_early_chunks() -> None
 
     # note (Junnan Li): each schedule point is locked behaviorally by feeding
     # one frame short of it (must not emit) and then the last frame (must).
-    feed(1)
-    assert emitted_frames == []
-    feed(1)
-    assert emitted_frames == [2]
-    feed(3)
-    assert emitted_frames == [2]
-    feed(1)
-    assert emitted_frames == [2, 4]
-    feed(7)
-    assert emitted_frames == [2, 4]
-    feed(1)
-    assert emitted_frames == [2, 4, 8]
+    for index, frames in enumerate(ramp):
+        if frames > 1:
+            feed(frames - 1)
+            assert emitted_frames == list(ramp[:index])
+        feed(1)
+        assert emitted_frames == list(ramp[: index + 1])
     feed(8)
-    assert emitted_frames == [2, 4, 8, 8], "past the ramp the steady stride rules"
+    assert emitted_frames == [*ramp, 8], "past the ramp the steady stride rules"
 
 
 def test_decode_graph_frame_counts_cover_startup_and_steady() -> None:

@@ -30,3 +30,4 @@ stages:
       max_batch_size: 1
       initial_max_batch_size: 1
       followup_max_batch_size: 1
+      stream_chunk_ramp: [1, 2, 2, 2, 4, 4]
