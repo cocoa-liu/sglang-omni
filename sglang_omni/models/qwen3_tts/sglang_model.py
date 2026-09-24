@@ -39,6 +39,7 @@ from sglang_omni.models.qwen3_tts.compat import (
 )
 from sglang_omni.models.qwen3_tts.predictor_kernels import (
     gather_codec_embedding_and_add,
+    short_cache_gqa_npu,
 )
 from sglang_omni.models.qwen3_tts.sampling_kernels import (
     sample_from_logits_with_seed_top_k_top_p,
@@ -80,8 +81,13 @@ def predictor_gqa_attention(
     num_key_value_heads: int,
     is_causal: bool,
 ) -> torch.Tensor:
-    """Run Predictor GQA, preferring Ascend's inference kernel on NPU for one query."""
+    """Run Predictor GQA with shape-specific kernels for non-causal NPU queries."""
     if q.device.type == "npu" and not is_causal:
+        output = short_cache_gqa_npu(q, key, value)
+        if output is not None:
+            return output
+        else:
+            pass
         fused_attention = getattr(
             getattr(torch.ops, "npu", None),
             "npu_fused_infer_attention_score",
