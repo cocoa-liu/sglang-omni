@@ -154,19 +154,72 @@ def test_npu_murmur_hash_and_float32_gumbel_execute_on_device() -> None:
 
 
 @pytest.mark.skipif(not _npu_available(), reason="requires Ascend NPU")
-def test_sorted_seeded_sampler_executes_float32_path_on_npu() -> None:
+@pytest.mark.parametrize(
+    "position,logprobs,expected",
+    [(1_707_985_137, [-100.0, 0.0], [9]), (1_625_054_877, [100.0, 0.0], [7])],
+)
+def test_sorted_seeded_sampler_executes_float32_path_on_npu(
+    position: int, logprobs: list[float], expected: list[int]
+) -> None:
     device = torch.device("npu:0")
     sampled = sampling_kernels.sample_from_sorted_logprobs_with_seed_small_k(
-        torch.tensor([[-100.0, 0.0]], device=device, dtype=torch.float32),
+        torch.tensor([logprobs], device=device, dtype=torch.float32),
         torch.tensor([[7, 9]], device=device, dtype=torch.long),
         torch.tensor([0], device=device, dtype=torch.int64),
-        torch.tensor([1_707_985_137], device=device, dtype=torch.int64),
+        torch.tensor([position], device=device, dtype=torch.int64),
     )
     torch.npu.synchronize(device)
 
     assert sampled is not None
     assert sampled.device.type == "npu"
-    assert sampled.cpu().tolist() == [9]
+    assert sampled.cpu().tolist() == expected
+
+
+@pytest.mark.skipif(not _npu_available(), reason="requires Ascend NPU")
+@pytest.mark.parametrize("num_cols", [1, 50, 257, 2048])
+def test_npu_fused_gumbel_matches_reference(num_cols: int) -> None:
+    generator = torch.Generator().manual_seed(1234)
+    storage = torch.randn(256, num_cols * 2, generator=generator)
+    logprobs = storage[:, ::2]
+    logprobs[0].fill_(-float("inf"))
+    logprobs[1].fill_(float("inf"))
+    logprobs[2, -1] = float("nan")
+    seeds = torch.tensor([0, -1, 2**40 + 123, -(2**63)] * 64)
+    positions = torch.arange(256, dtype=torch.int64) + 1_707_985_137
+    expected = sampling_kernels.seeded_gumbel_argmax_float32(logprobs, seeds, positions)
+    actual = sampling_kernels.seeded_gumbel_argmax_float32(
+        storage.npu()[:, ::2], seeds.npu(), positions.npu()
+    )
+    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not _npu_available(), reason="requires Ascend NPU")
+def test_npu_fused_gumbel_graph_replay_uses_updated_inputs() -> None:
+    generator = torch.Generator().manual_seed(5678)
+    logprobs_cpu = torch.randn(16, 50, generator=generator)
+    seeds_cpu = torch.tensor([0, -1, 2**40 + 123, -(2**63)] * 4)
+    positions_cpu = torch.arange(16, dtype=torch.int64)
+    logprobs = logprobs_cpu.npu()
+    seeds, positions = seeds_cpu.npu(), positions_cpu.npu()
+    for _ in range(2):
+        sampling_kernels.seeded_gumbel_argmax_float32(logprobs, seeds, positions)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        actual = sampling_kernels.seeded_gumbel_argmax_float32(
+            logprobs, seeds, positions
+        )
+    for _ in range(32):
+        logprobs_cpu = torch.randn(16, 50, generator=generator)
+        seeds_cpu = seeds_cpu.roll(1)
+        positions_cpu += 1
+        logprobs.copy_(logprobs_cpu)
+        seeds.copy_(seeds_cpu)
+        positions.copy_(positions_cpu)
+        graph.replay()
+        expected = sampling_kernels.seeded_gumbel_argmax_float32(
+            logprobs_cpu, seeds_cpu, positions_cpu
+        )
+        torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
 
 
 def test_npu_sampling_dispatch_does_not_capture_cpu() -> None:
