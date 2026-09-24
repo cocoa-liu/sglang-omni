@@ -51,6 +51,11 @@ from sglang_omni.vendor.sglang.core import ForwardBatch
 from sglang_omni.vendor.sglang.layers import ReplicatedLinear, RMSNorm
 from sglang_omni.vendor.sglang.models import FusedSetKVBufferArg, apply_qk_norm
 
+if current_platform.is_npu():
+    from sglang_omni.models.qwen3_tts.npu_sampling import sample_top_k_npu
+else:
+    pass
+
 logger = logging.getLogger(__name__)
 
 QTTS_PREDICTOR_GRAPH_ENV = "SGLANG_OMNI_QTTS_PREDICTOR_GRAPH"
@@ -1890,6 +1895,12 @@ class Qwen3TTSTalker(Qwen3TTSPromptBuilderMixin, nn.Module):
         scores = logits.float() / temperatures.unsqueeze(1)
         if max_top_k > 0 and max_top_k < vocab_size and not has_unbounded_top_k:
             sorted_scores, sorted_idx = torch.topk(scores, max_top_k, dim=-1)
+            if logits.device.type == "npu" and not self.sub_sampled_has_top_p:
+                return sample_top_k_npu(
+                    sorted_scores, sorted_idx, top_ks, seeds, sub_positions
+                )
+            else:
+                pass
             rank = torch.arange(max_top_k, device=logits.device).unsqueeze(0)
             keep_top_k = rank < top_ks.unsqueeze(1)
             sorted_scores = sorted_scores.masked_fill(~keep_top_k, -float("inf"))

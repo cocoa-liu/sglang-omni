@@ -222,6 +222,62 @@ def test_npu_fused_gumbel_graph_replay_uses_updated_inputs() -> None:
         torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(not _npu_available(), reason="requires Ascend NPU")
+@pytest.mark.parametrize("width", [1, 8, 50, 128, 1024])
+def test_npu_top_k_fusion_matches_probability_reference(width: int) -> None:
+    from sglang_omni.models.qwen3_tts.npu_sampling import sample_top_k_npu
+
+    generator = torch.Generator().manual_seed(1234)
+    scores = torch.randn(256, width, generator=generator).sort(descending=True)[0]
+    scores[0].fill_(-float("inf"))
+    scores[1].fill_(0)
+    scores[2, 0] = float("nan")
+    scores[3] *= 100
+    indices = torch.arange(width).flip(0).expand(256, -1).contiguous()
+    top_ks = torch.randint(1, width + 1, (256,), generator=generator)
+    seeds = torch.tensor([0, -1, 2**40 + 123, -(2**63)] * 64)
+    positions = torch.arange(256) + 1_707_985_137
+    masked = scores.masked_fill(
+        torch.arange(width)[None] >= top_ks[:, None], -float("inf")
+    )
+    probabilities = masked.softmax(dim=-1)
+    logprobs = torch.where(probabilities > 0, probabilities.log(), -float("inf"))
+    ranks = sampling_kernels.seeded_gumbel_argmax_float32(logprobs, seeds, positions)
+    expected = indices.gather(1, ranks[:, None]).flatten()
+    actual = sample_top_k_npu(
+        scores.npu(), indices.npu(), top_ks.npu(), seeds.npu(), positions.npu()
+    )
+    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not _npu_available(), reason="requires Ascend NPU")
+def test_npu_top_k_graph_replay_reads_updated_limits() -> None:
+    from sglang_omni.models.qwen3_tts.npu_sampling import sample_top_k_npu
+
+    scores = torch.zeros((16, 50), device="npu")
+    indices = torch.arange(50, device="npu").expand(16, -1).contiguous()
+    top_ks = torch.full((16,), 50, device="npu", dtype=torch.long)
+    seeds = torch.arange(16, device="npu")
+    positions = torch.arange(16, device="npu")
+    for _ in range(2):
+        sample_top_k_npu(scores, indices, top_ks, seeds, positions)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        actual = sample_top_k_npu(scores, indices, top_ks, seeds, positions)
+    for limit in (1, 17, 50, 2):
+        top_ks.fill_(limit)
+        positions.add_(1)
+        scores.copy_(torch.randn_like(scores).sort(descending=True)[0])
+        graph.replay()
+        masked = scores.cpu().masked_fill(
+            torch.arange(50)[None] >= limit, -float("inf")
+        )
+        expected = sampling_kernels.seeded_gumbel_argmax_float32(
+            masked.softmax(dim=-1).log(), seeds.cpu(), positions.cpu()
+        )
+        torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+
+
 def test_npu_sampling_dispatch_does_not_capture_cpu() -> None:
     sampled = sampling_kernels.sample_from_logprobs_with_seed_npu(
         torch.zeros((1, 2), dtype=torch.float32),
