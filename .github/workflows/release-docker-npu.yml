@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish images to Docker Hub
+        description: Publish images to Huawei Cloud SWR
         type: boolean
         default: true
   workflow_call:
@@ -19,13 +19,17 @@ on:
         type: boolean
         default: true
     secrets:
-      DOCKERHUB_USERNAME:
+      NPU_SWR_USERNAME:
         required: false
-      DOCKERHUB_TOKEN:
+      NPU_SWR_PASSWORD:
         required: false
 
 permissions:
   contents: read
+
+env:
+  REGISTRY: swr.cn-southwest-2.myhuaweicloud.com
+  IMAGE_NAME: base_image/dockerhub/lmsysorg/sglang-omni
 
 concurrency:
   group: release-npu-${{ github.workflow }}-${{ github.ref }}
@@ -40,18 +44,17 @@ jobs:
       base_image_910b: ${{ steps.config.outputs.base_image_910b }}
       publish: ${{ steps.publication.outputs.publish }}
     steps:
-      # Reuse the standard Docker Hub secrets used by SGLang's lmsysorg releases.
       - name: Validate publication settings
         id: publication
         env:
           REQUESTED: ${{ github.event_name != 'pull_request' && (inputs.publish || github.event_name == 'push') }}
           REPOSITORY: ${{ github.repository }}
-          HUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          HUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          SWR_USERNAME: ${{ secrets.NPU_SWR_USERNAME }}
+          SWR_PASSWORD: ${{ secrets.NPU_SWR_PASSWORD }}
         run: |
           if [[ "$REQUESTED" == true ]]; then
             [[ "$REPOSITORY" == sgl-project/sglang-omni ]] || { echo 'Publication is restricted to the upstream repository.' >&2; exit 1; }
-            [[ -n "$HUB_USERNAME" && -n "$HUB_TOKEN" ]] || { echo 'Configure DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets.' >&2; exit 1; }
+            [[ -n "$SWR_USERNAME" && -n "$SWR_PASSWORD" ]] || { echo 'Configure NPU_SWR_USERNAME and NPU_SWR_PASSWORD secrets.' >&2; exit 1; }
           fi
           echo "publish=$REQUESTED" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
@@ -91,18 +94,19 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: lmsysorg/sglang-omni
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           flavor: latest=false
           tags: |
             type=ref,event=tag,suffix=-cann${{ matrix.cann }}-${{ matrix.device }}
             type=sha,suffix=-cann${{ matrix.cann }}-${{ matrix.device }}
             type=raw,value=${{ inputs.image_tag }}-cann${{ matrix.cann }}-${{ matrix.device }},enable=${{ inputs.image_tag != '' }}
-      - name: Log into Docker Hub
+      - name: Log into Huawei Cloud SWR
         if: needs.preprocess.outputs.publish == 'true'
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.NPU_SWR_USERNAME }}
+          password: ${{ secrets.NPU_SWR_PASSWORD }}
       - name: Build and publish ARM64 image
         id: build
         uses: docker/build-push-action@v6
@@ -121,7 +125,7 @@ jobs:
       - name: Record published image
         if: needs.preprocess.outputs.publish == 'true'
         env:
-          IMAGE: lmsysorg/sglang-omni
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           DIGEST: ${{ steps.build.outputs.digest }}
           DEVICE: ${{ matrix.device }}
           TAGS: ${{ steps.meta.outputs.tags }}
