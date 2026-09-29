@@ -19,9 +19,9 @@ on:
         type: boolean
         default: true
     secrets:
-      NPU_SWR_USERNAME:
+      ASCEND_NPU_DOCKER_USERNAME:
         required: false
-      NPU_SWR_PASSWORD:
+      ASCEND_NPU_DOCKER_TOKEN:
         required: false
 
 permissions:
@@ -49,12 +49,12 @@ jobs:
         env:
           REQUESTED: ${{ github.event_name != 'pull_request' && (inputs.publish || github.event_name == 'push') }}
           REPOSITORY: ${{ github.repository }}
-          SWR_USERNAME: ${{ secrets.NPU_SWR_USERNAME }}
-          SWR_PASSWORD: ${{ secrets.NPU_SWR_PASSWORD }}
+          SWR_USERNAME: ${{ secrets.ASCEND_NPU_DOCKER_USERNAME }}
+          SWR_PASSWORD: ${{ secrets.ASCEND_NPU_DOCKER_TOKEN }}
         run: |
           if [[ "$REQUESTED" == true ]]; then
             [[ "$REPOSITORY" == sgl-project/sglang-omni ]] || { echo 'Publication is restricted to the upstream repository.' >&2; exit 1; }
-            [[ -n "$SWR_USERNAME" && -n "$SWR_PASSWORD" ]] || { echo 'Configure NPU_SWR_USERNAME and NPU_SWR_PASSWORD secrets.' >&2; exit 1; }
+            [[ -n "$SWR_USERNAME" && -n "$SWR_PASSWORD" ]] || { echo 'Configure ASCEND_NPU_DOCKER_USERNAME and ASCEND_NPU_DOCKER_TOKEN secrets.' >&2; exit 1; }
           fi
           echo "publish=$REQUESTED" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
@@ -105,8 +105,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.NPU_SWR_USERNAME }}
-          password: ${{ secrets.NPU_SWR_PASSWORD }}
+          username: ${{ secrets.ASCEND_NPU_DOCKER_USERNAME }}
+          password: ${{ secrets.ASCEND_NPU_DOCKER_TOKEN }}
       - name: Build and publish ARM64 image
         id: build
         uses: docker/build-push-action@v6
