@@ -78,7 +78,7 @@ jobs:
   build_and_publish_arm64:
     needs: preprocess
     runs-on: ${{ needs.preprocess.outputs.publish == 'true' && 'linux-aarch64-a2-1' || 'ubuntu-22.04-arm' }}
-    timeout-minutes: 360
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.preprocess.outputs.matrix) }}
