@@ -42,7 +42,7 @@ from sglang.srt.managers.scheduler import validate_input_length
 from sglang.srt.mem_cache.common import release_kv_cache
 from sglang.srt.runtime_context import get_model, get_serving
 from sglang.srt.session.session_controller import SessionController
-from sglang.srt.utils import broadcast_pyobj
+from sglang.srt.utils import DynamicGradMode, broadcast_pyobj
 
 from sglang_omni.admission import QueueFullError
 from sglang_omni.model_runner.base import PendingStep
@@ -3017,6 +3017,8 @@ class OmniScheduler:
             pass
         release_kv_cache(req, self.tree_cache)
 
+    # note (0xtoward): with autograd on, writes to reused buffers leak every step.
+    @DynamicGradMode()
     def event_loop_normal(self) -> None:
         # Note (Chenyang): yield the GIL when idle so co-located non-AR stages
         # (encoders, preprocessor) running in sibling threads aren't starved
@@ -3327,6 +3329,7 @@ class OmniScheduler:
             pass
         return batch if batch.reqs else None
 
+    @DynamicGradMode()
     def event_loop_async_decode(self) -> None:
         """One-step-lookahead decode loop (single stream + CUDA event).
 
