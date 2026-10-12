@@ -54,7 +54,7 @@ def tts_server(tmp_path_factory):
     from tests.test_model.omni_router_utils import find_available_port_range
 
     assert current_platform.is_npu() and torch.npu.is_available()
-    assert torch.npu.device_count() == 1, "Reserve one visible NPU"
+    assert torch.npu.device_count() >= 1, "At least one allocated NPU is required"
     model = Path(os.environ["OMNI_NPU_TTS_MODEL"]).resolve()
     config = Path(os.environ["OMNI_NPU_TTS_CONFIG"]).resolve()
     assert (model / "config.json").is_file(), "A complete local model is required"

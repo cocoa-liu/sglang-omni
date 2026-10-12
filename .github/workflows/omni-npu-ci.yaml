@@ -22,7 +22,6 @@ permissions:
 
 env:
   NPU_CI_IMAGE: &npu_ci_image swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni@sha256:993fd7fb5a2fceb86f15fabff953fa76b67e63e558954c153aecdccbf72fab9a
-  NPU_CI_DATA_DIR: /data
 
 jobs:
   preflight:
@@ -48,8 +47,6 @@ jobs:
           python - <<'PY'
           import os, re
           assert re.fullmatch(r'.+@sha256:[0-9a-f]{64}', os.environ['NPU_CI_IMAGE']), 'Set NPU_CI_IMAGE to a validated SWR 910B image pinned by digest'
-          path = os.environ['NPU_CI_DATA_DIR']
-          assert path.startswith('/') and path != '/' and 'REPLACE' not in path, 'Set NPU_CI_DATA_DIR to the data directory mounted in the test Pod'
           PY
 
   models:

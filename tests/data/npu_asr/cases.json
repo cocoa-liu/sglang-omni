@@ -1,0 +1,12 @@
+{
+  "English": {
+    "audio": "english.wav",
+    "text": "Hello, this is a speech synthesis test on Ascend.",
+    "max_cer": 0.1
+  },
+  "Chinese": {
+    "audio": "chinese.wav",
+    "text": "你好，欢迎使用语音合成服务。",
+    "max_cer": 0.1
+  }
+}
