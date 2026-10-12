@@ -1,0 +1,266 @@
+{
+  "date": "2026-10-12",
+  "environment": {
+    "torch": "2.10.0+cpu",
+    "torch-npu": "2.10.0",
+    "sglang": "0.5.19.dev852+gf58665451",
+    "transformers": "5.12.1",
+    "kaldi-native-fbank": "1.22.3",
+    "kaldiio": "2.18.1",
+    "accelerate": "1.15.0",
+    "pytest": "9.1.1",
+    "python": "3.11.15 (main, May 13 2026, 09:39:24) [GCC 11.4.0]",
+    "sglang_commit": "f5866545186f27a8a01c1a083e8c32809b5506f3",
+    "device": "Ascend 910 A3; physical device 12; logical npu:0"
+  },
+  "precision": {
+    "encoder": "float32",
+    "adapter": "float32",
+    "decoder": "bfloat16"
+  },
+  "encoder_parity": [
+    {
+      "file": "hello_zh.wav",
+      "feature_max_abs_error": 0.0,
+      "embedding_max_abs_error": 0.0,
+      "encoder_frames": 58
+    },
+    {
+      "file": "hello_en.wav",
+      "feature_max_abs_error": 0.0,
+      "embedding_max_abs_error": 0.0,
+      "encoder_frames": 56
+    },
+    {
+      "file": "BAC009S0764W0121.wav",
+      "feature_max_abs_error": 0.0,
+      "embedding_max_abs_error": 0.0,
+      "encoder_frames": 105
+    },
+    {
+      "file": "IT0011W0001.wav",
+      "feature_max_abs_error": 0.0,
+      "embedding_max_abs_error": 0.0,
+      "encoder_frames": 50
+    }
+  ],
+  "reference": [
+    {
+      "file": "hello_zh.wav",
+      "text": "你好世界",
+      "tokens": [
+        108386,
+        99489,
+        151645
+      ],
+      "elapsed_s": 0.5880146920681
+    },
+    {
+      "file": "hello_en.wav",
+      "text": "hello speech",
+      "tokens": [
+        14990,
+        8806,
+        151645
+      ],
+      "elapsed_s": 0.16796962870284915
+    },
+    {
+      "file": "BAC009S0764W0121.wav",
+      "text": "甚至出现交易几乎停滞的情况",
+      "tokens": [
+        100636,
+        100347,
+        99886,
+        100740,
+        118083,
+        102072,
+        151645
+      ],
+      "elapsed_s": 0.30410155979916453
+    },
+    {
+      "file": "IT0011W0001.wav",
+      "text": "换一首歌",
+      "tokens": [
+        71134,
+        108462,
+        99678,
+        151645
+      ],
+      "elapsed_s": 0.1892072120681405
+    }
+  ],
+  "native": {
+    "serial": [
+      {
+        "file": "hello_zh.wav",
+        "text": "你好世界",
+        "elapsed_s": 4.415
+      },
+      {
+        "file": "hello_en.wav",
+        "text": "hello speech",
+        "elapsed_s": 0.291
+      },
+      {
+        "file": "BAC009S0764W0121.wav",
+        "text": "甚至出现交易几乎停滞的情况",
+        "elapsed_s": 0.412
+      },
+      {
+        "file": "IT0011W0001.wav",
+        "text": "换一首歌",
+        "elapsed_s": 0.296
+      }
+    ],
+    "concurrent": [
+      {
+        "file": "hello_zh.wav",
+        "text": "你好世界",
+        "elapsed_s": 0.626
+      },
+      {
+        "file": "hello_en.wav",
+        "text": "hello speech",
+        "elapsed_s": 0.625
+      },
+      {
+        "file": "BAC009S0764W0121.wav",
+        "text": "甚至出现交易几乎停滞的情况",
+        "elapsed_s": 0.729
+      },
+      {
+        "file": "IT0011W0001.wav",
+        "text": "换一首歌",
+        "elapsed_s": 0.65
+      }
+    ],
+    "streamed": [
+      {
+        "file": "hello_zh.wav",
+        "text": "你好世界",
+        "elapsed_s": 0.258
+      },
+      {
+        "file": "hello_en.wav",
+        "text": "hello speech",
+        "elapsed_s": 0.214
+      },
+      {
+        "file": "BAC009S0764W0121.wav",
+        "text": "甚至出现交易几乎停滞的情况",
+        "elapsed_s": 0.364
+      },
+      {
+        "file": "IT0011W0001.wav",
+        "text": "换一首歌",
+        "elapsed_s": 0.23
+      }
+    ]
+  },
+  "unit_tests": {
+    "passed": 28,
+    "log": "............................                                             [100%]\n=============================== warnings summary ===============================\n../../../../../usr/local/python3.11.15/lib/python3.11/site-packages/torch/jit/_script.py:362: 14 warnings\n  /usr/local/python3.11.15/lib/python3.11/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.\n    warnings.warn(\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n28 passed, 14 warnings in 13.03s\n"
+  },
+  "acoustic_bfloat16_comparison": [
+    {
+      "file": "hello_zh.wav",
+      "text": "你好世界",
+      "elapsed_s": 4.567
+    },
+    {
+      "file": "hello_en.wav",
+      "text": "哈喽 speech",
+      "elapsed_s": 0.345
+    },
+    {
+      "file": "BAC009S0764W0121.wav",
+      "text": "甚至出现交易几乎停滞的情况",
+      "elapsed_s": 0.412
+    },
+    {
+      "file": "IT0011W0001.wav",
+      "text": "换一首歌",
+      "elapsed_s": 0.259
+    }
+  ],
+  "weights": [
+    {
+      "Path": "model-00000-of-00009.safetensors",
+      "Size": 2893434376,
+      "Sha256": "80f47eb71913de2b2c6ca8a9a3fed5ed4822001d53c8f2ab4716aa8f552e84ae",
+      "Revision": "25fa06878846fe089b328eca4d0c9251261c487a"
+    },
+    {
+      "Path": "model-00001-of-00009.safetensors",
+      "Size": 4161914520,
+      "Sha256": "05be3bdbd25641247b44d262c31f6b4dea02304b8aaa52e4c3d8da903c140fb6",
+      "Revision": "25fa06878846fe089b328eca4d0c9251261c487a"
+    },
+    {
+      "Path": "model-00002-of-00009.safetensors",
+      "Size": 4272092872,
+      "Sha256": "f17a140989e9dfa54da7828bbd304ff57c18e2698a7ebd52450162fac36cfa4b",
+      "Revision": "25fa06878846fe089b328eca4d0c9251261c487a"
+    },
+    {
+      "Path": "model-00003-of-00009.safetensors",
+      "Size": 4118000240,
+      "Sha256": "842a4da4ed977a3235ae832760c6fc105676680f86a90929722d49c48df03d0f",
+      "Revision": "25fa06878846fe089b328eca4d0c9251261c487a"
+    },
+    {
+      "Path": "model-00004-of-00009.safetensors",
+      "Size": 4272092920,
+      "Sha256": "a1d9f00efb70cdb7f9cb7740d8e344a406a895d7fd769285eb341b1578d93eae",
+      "Revision": "25fa06878846fe089b328eca4d0c9251261c487a"
+    },
+    {
+      "Path": "model-00005-of-00009.safetensors",
+      "Size": 4118000296,
+      "Sha256": "8015b76c9c1ed2d4ed876e3e2b05731fa0525188d78c1db30f718f1921bf0e9a",
+      "Revision": "25fa06878846fe089b328eca4d0c9251261c487a"
+    },
+    {
+      "Path": "model-00006-of-00009.safetensors",
+      "Size": 4272092920,
+      "Sha256": "a1ee9b147e9df4a8c47b8f1bff4ea10c53c09d659a604907207463631620697d",
+      "Revision": "25fa06878846fe089b328eca4d0c9251261c487a"
+    },
+    {
+      "Path": "model-00007-of-00009.safetensors",
+      "Size": 3068322376,
+      "Sha256": "3aabe71bbeb63060052eee23fb389d095b1a2d82a6d7c5cec997a3b113e4e188",
+      "Revision": "25fa06878846fe089b328eca4d0c9251261c487a"
+    },
+    {
+      "Path": "model-00008-of-00009.safetensors",
+      "Size": 2268099064,
+      "Sha256": "0f395fb7d7d810a13d80da43b88f5a03c35ff610f2d64ad326620473490cfea4",
+      "Revision": "25fa06878846fe089b328eca4d0c9251261c487a"
+    }
+  ],
+  "audio_sha256": {
+    "hello_zh.wav": "e09abc88000e7186e9e11b4ba9ae04ea79af2173e2fc583cf8b25e0d36199061",
+    "hello_en.wav": "92d353353bf8955d8561d813ac0920adcabfbf6c67aa65369df44b4f86989e24",
+    "BAC009S0764W0121.wav": "46dbc998c9d1d48111267c40741dd3200f2e5bcf4075f8c4c97f4451160dce50",
+    "IT0011W0001.wav": "e89a5721b3ec738753f65354457f50a1f8d478ca59cbc07f37e4e80b24c8250c"
+  },
+  "reference_source_sha256": {
+    "conformer_encoder.py": "4a7a7040d61e7986b2dffaf8ec478f40eaedbc7b135e242c40eb9a4823f9d505",
+    "adapter.py": "4cb04f3fff4167575ed4de7aa6ac57cacfc7a7ea1276daf3323500154ee6dc9b",
+    "asr_feat.py": "de58c6fc238ef79a001bfff6b88fc5546526f79e3652c6369aadf8ae7d3cdc3e"
+  },
+  "initial_omni_base": "9c0e76ebd",
+  "pr_branch_verification": {
+    "omni_base": "1ef7b8913cd2a4a3c803f1c75fafad42537356ce",
+    "unit_tests_passed": 28,
+    "unit_test_duration_s": 12.75,
+    "pre_commit": "passed with rustfmt-sglang-omni-router skipped; Cargo unavailable",
+    "end_to_end_status": "blocked before model loading",
+    "end_to_end_error": "ImportError: cannot import name 'SpawnRanks' from 'sglang.srt.runtime_context'",
+    "runtime": "sglang 0.5.19.dev852+gf58665451",
+    "required_followup": "Re-run HTTP smoke tests with a SGLang runtime matching the current Omni installation requirements."
+  }
+}
