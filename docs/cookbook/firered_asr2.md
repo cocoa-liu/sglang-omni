@@ -25,6 +25,13 @@ It contains `audio_encoder_conf`, the tokenizer, CMVN statistics in
 integration does not depend on vLLM. The original `model.pth.tar` plus separate
 Qwen2 directory is not an input format for this loader.
 
+The current Omni runtime requires SGLang 0.5.21. The Ascend validation uses
+that wheel in an isolated virtual environment with the existing CANN,
+PyTorch, and torch-npu installation. This base's NPU installation manifest
+still names 0.5.20, which lacks the `SpawnRanks` API imported by Omni. See
+the [tested environment and launch command](../developer_reference/firered_asr2_npu_validation.md)
+when reproducing on Ascend.
+
 ## Serve
 
 ```bash
@@ -44,6 +51,11 @@ transcript in the validation set. Lower concurrency or the memory fraction to le
 more encoder activation headroom. The encoder processes at most four audio
 items per forward. Decode and prefill graphs are disabled for this initial
 implementation.
+
+Audio embeddings use a 256 MiB cache by default. For uncached evaluation,
+set `--asr.factory.mm_embedding_cache_size_bytes 0` and
+`--asr.engine.disable_radix_cache true`. This makes repeated recordings run
+through the encoder and decoder prefill again.
 
 ```bash
 curl http://127.0.0.1:8000/v1/audio/transcriptions \
@@ -90,6 +102,4 @@ or a throughput benchmark.
 
 See the [Ascend validation record](../developer_reference/firered_asr2_npu_validation.md)
 for the tested environment, reference outputs, launch command, and current
-PR revalidation status. Full-model results were collected on the earlier
-development base; revalidation against the current Omni main requires a
-matching SGLang runtime.
+PR verification results, including SeedTTS English WER and Chinese CER.
