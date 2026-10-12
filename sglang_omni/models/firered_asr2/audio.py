@@ -12,8 +12,6 @@ import torch
 from numpy.typing import NDArray
 from torch import nn
 
-from sglang_omni.utils.checkpoint import resolve_checkpoint
-
 try:
     import kaldi_native_fbank as knf
 except ImportError:
@@ -38,12 +36,17 @@ class FireRedFeatureExtractor:
         sample_rate: int = 16000,
     ) -> None:
         self.means = np.asarray(means, dtype=np.float64)
-        self.inv_std = np.asarray(inverse_std_variences, dtype=np.float64)
-        if self.means.shape != (80,) or self.inv_std.shape != (80,):
+        self.inverse_standard_deviations = np.asarray(
+            inverse_std_variences, dtype=np.float64
+        )
+        if self.means.shape != (80,) or self.inverse_standard_deviations.shape != (80,):
             raise ValueError("FireRedASR2 requires 80-dimensional CMVN statistics")
         else:
             pass
-        if not np.isfinite(self.means).all() or not np.isfinite(self.inv_std).all():
+        if (
+            not np.isfinite(self.means).all()
+            or not np.isfinite(self.inverse_standard_deviations).all()
+        ):
             raise ValueError("CMVN statistics must be finite")
         else:
             pass
@@ -55,8 +58,7 @@ class FireRedFeatureExtractor:
 
     @classmethod
     def from_pretrained(cls, path: str) -> FireRedFeatureExtractor:
-
-        root = Path(resolve_checkpoint(path))
+        root = Path(path)
         config = json.loads((root / "preprocessor_config.json").read_text())
         return cls(
             config["means"],
@@ -78,15 +80,15 @@ class FireRedFeatureExtractor:
         else:
             pass
         # note (cocoa00): Request builders run concurrently; each call needs its own extractor.
-        opts = knf.FbankOptions()
-        opts.frame_opts.dither = 0.0
-        opts.frame_opts.snip_edges = True
-        opts.frame_opts.samp_freq = self.sample_rate
-        opts.frame_opts.frame_length_ms = 25.0
-        opts.frame_opts.frame_shift_ms = 10.0
-        opts.mel_opts.num_bins = 80
-        opts.mel_opts.debug_mel = False
-        fbank = knf.OnlineFbank(opts)
+        options = knf.FbankOptions()
+        options.frame_opts.dither = 0.0
+        options.frame_opts.snip_edges = True
+        options.frame_opts.samp_freq = self.sample_rate
+        options.frame_opts.frame_length_ms = 25.0
+        options.frame_opts.frame_shift_ms = 10.0
+        options.mel_opts.num_bins = 80
+        options.mel_opts.debug_mel = False
+        fbank = knf.OnlineFbank(options)
         # note (cocoa00): Training uses int16-scale Kaldi features.
         fbank.accept_waveform(self.sample_rate, (waveform * 32768.0).tolist())
         if fbank.num_frames_ready < 5:
@@ -94,16 +96,14 @@ class FireRedFeatureExtractor:
         else:
             pass
         features = np.stack([fbank.get_frame(i) for i in range(fbank.num_frames_ready)])
-        features = (features - self.means) * self.inv_std
+        features = (features - self.means) * self.inverse_standard_deviations
         return torch.from_numpy(features.astype(np.float32))
 
 
 class FireRedAdapter(nn.Module):
     """Frame concatenation and two-layer projection, matching official weights."""
 
-    def __init__(
-        self, encoder_dim: int, llm_dim: int, downsample_rate: int = 2
-    ) -> None:
+    def __init__(self, encoder_dim: int, llm_dim: int, downsample_rate: int) -> None:
         super().__init__()
         self.ds = downsample_rate
         self.linear1 = nn.Linear(encoder_dim * downsample_rate, llm_dim)
@@ -113,9 +113,13 @@ class FireRedAdapter(nn.Module):
     def forward(
         self, x: torch.Tensor, lengths: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        size = x.shape[1] - x.shape[1] % self.ds
-        x = x[:, :size].contiguous().view(x.shape[0], size // self.ds, -1)
+        usable_frames = x.shape[1] - x.shape[1] % self.ds
+        x = (
+            x[:, :usable_frames]
+            .contiguous()
+            .view(x.shape[0], usable_frames // self.ds, -1)
+        )
         return (
             self.linear2(self.relu(self.linear1(x))),
-            lengths.clamp(max=size) // self.ds,
+            lengths.clamp(max=usable_frames) // self.ds,
         )

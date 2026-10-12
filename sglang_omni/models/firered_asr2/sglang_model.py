@@ -36,17 +36,12 @@ class FireRedASR2ForConditionalGeneration(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
-        conf = dict(config.audio_encoder_conf)
-        if "n_layers_enc" in conf:
-            conf["n_layers"] = conf.pop("n_layers_enc")
-        else:
-            pass
         # note (cocoa00): Preserve FP32 acoustic weights before loading to avoid BF16 rounding.
-        self.encoder = ConformerEncoder(**conf).float()
+        self.encoder = ConformerEncoder(**config.audio_encoder_conf).float()
         self.encoder_projector = FireRedAdapter(
             self.encoder.odim,
             config.hidden_size,
-            int(getattr(config, "encoder_downsample_rate", 2)),
+            config.encoder_downsample_rate,
         ).float()
         self.language_model = Qwen2ForCausalLM(
             config, quant_config, prefix=add_prefix("language_model", prefix)
@@ -60,38 +55,40 @@ class FireRedASR2ForConditionalGeneration(nn.Module):
         return self.pattern.pad_input_tokens(input_ids, mm_inputs)
 
     @torch.no_grad()
-    def get_audio_feature(self, items: list[MultimodalDataItem]) -> torch.Tensor:
-        if not items:
+    def get_audio_feature(self, audio_items: list[MultimodalDataItem]) -> torch.Tensor:
+        if not audio_items:
             raise ValueError("FireRedASR2 received an empty audio batch")
         else:
             pass
-        reference = next(self.encoder.parameters())
+        encoder_parameter = next(self.encoder.parameters())
         outputs = []
-        for start in range(0, len(items), self.encoder_max_batch_size):
-            batch = items[start : start + self.encoder_max_batch_size]
-            features = [item.feature.squeeze(0) for item in batch]
+        for start in range(0, len(audio_items), self.encoder_max_batch_size):
+            audio_batch = audio_items[start : start + self.encoder_max_batch_size]
+            audio_features = [item.feature.squeeze(0) for item in audio_batch]
             lengths = torch.tensor(
-                [x.shape[0] for x in features], device=reference.device
+                [x.shape[0] for x in audio_features], device=encoder_parameter.device
             )
-            if any(x.ndim != 2 or x.shape[1] != 80 for x in features):
+            if any(x.ndim != 2 or x.shape[1] != 80 for x in audio_features):
                 raise ValueError("FireRedASR2 features must have shape [frames, 80]")
             else:
                 pass
-            padded = nn.utils.rnn.pad_sequence(features, batch_first=True).to(
-                device=reference.device, dtype=reference.dtype
+            padded = nn.utils.rnn.pad_sequence(audio_features, batch_first=True).to(
+                device=encoder_parameter.device, dtype=encoder_parameter.dtype
             )
-            encoded, enc_lengths, _ = self.encoder(padded, lengths)
-            projected, _ = self.encoder_projector(encoded, enc_lengths)
-            for index, feature in enumerate(features):
-                count = num_audio_tokens(feature.shape[0], self.encoder_projector.ds)
-                declared = getattr(batch[index], "num_audio_tokens", count)
-                if count != declared:
+            encoded, encoder_lengths, _ = self.encoder(padded, lengths)
+            projected, _ = self.encoder_projector(encoded, encoder_lengths)
+            for index, feature in enumerate(audio_features):
+                audio_token_count = num_audio_tokens(
+                    feature.shape[0], self.encoder_projector.ds
+                )
+                declared_audio_token_count = audio_batch[index].num_audio_tokens
+                if audio_token_count != declared_audio_token_count:
                     raise ValueError(
-                        f"Audio token length mismatch: {declared} != {count}"
+                        f"Audio token length mismatch: {declared_audio_token_count} != {audio_token_count}"
                     )
                 else:
                     pass
-                outputs.append(projected[index, :count])
+                outputs.append(projected[index, :audio_token_count])
         return torch.cat(outputs, dim=0).to(
             dtype=self.language_model.get_input_embeddings().weight.dtype
         )

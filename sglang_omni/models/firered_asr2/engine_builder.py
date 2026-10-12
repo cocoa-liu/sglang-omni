@@ -11,8 +11,8 @@ from sglang_omni.models.firered_asr2.request_builders import (
     FireRedRequestBuilder,
     FireRedRequestData,
     FireRedResultAdapter,
-    make_firered_adapters,
-    make_firered_stream_builder,
+    make_firered_asr2_scheduler_adapters,
+    make_firered_asr2_stream_output_builder,
 )
 from sglang_omni.scheduling.engine_factory import (
     AsrEngineBuilder,
@@ -49,12 +49,6 @@ class FireRedASR2EngineBuilder(AsrEngineBuilder[FireRedRequestData]):
         self.tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
         self.feature_extractor = FireRedFeatureExtractor.from_pretrained(checkpoint_dir)
         self.config = AutoConfig.from_pretrained(checkpoint_dir)
-        if not hasattr(self.config, "audio_encoder_conf"):
-            raise ValueError(
-                "FireRedASR2 requires a merged HF checkpoint with audio_encoder_conf"
-            )
-        else:
-            pass
 
     def generation_defaults(self, *, dtype: str) -> GenerationDefaults:
         return {
@@ -71,7 +65,7 @@ class FireRedASR2EngineBuilder(AsrEngineBuilder[FireRedRequestData]):
     def make_adapters(
         self, model: torch.nn.Module
     ) -> tuple[FireRedRequestBuilder, FireRedResultAdapter]:
-        return make_firered_adapters(
+        return make_firered_asr2_scheduler_adapters(
             tokenizer=self.tokenizer,
             feature_extractor=self.feature_extractor,
             max_new_tokens=self.max_new_tokens,
@@ -90,7 +84,9 @@ class FireRedASR2EngineBuilder(AsrEngineBuilder[FireRedRequestData]):
 
     def extra_scheduler_kwargs(self) -> SchedulerExtras[FireRedRequestData]:
         return {
-            "stream_output_builder": make_firered_stream_builder(self.tokenizer),
+            "stream_output_builder": make_firered_asr2_stream_output_builder(
+                self.tokenizer
+            ),
             "request_build_max_workers": 2,
             "request_build_max_pending": 16,
         }

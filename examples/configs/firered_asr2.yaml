@@ -5,9 +5,5 @@ model_path: allendou/FireRedASR2-LLM-vllm
 
 stages:
   asr:
-    factory:
-      # Decoder dtype; the acoustic encoder and adapter remain float32.
-      dtype: bfloat16
     engine:
-      max_running_requests: 8
       mem_fraction_static: 0.70

@@ -21,6 +21,7 @@ from sglang_omni.models.firered_asr2.audio import (
     FireRedFeatureExtractor,
     num_audio_tokens,
 )
+from sglang_omni.models.firered_asr2.config import FireRedASR2PipelineConfig
 from sglang_omni.preprocessing.transcription import prepare_audio
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.sglang_backend.request_data import SGLangARRequestData
@@ -46,115 +47,138 @@ class FireRedRequestBuilder(Protocol):
 
 
 class FireRedResultAdapter(Protocol):
-    def __call__(self, data: FireRedRequestData) -> StagePayload: ...
+    def __call__(self, request_data: FireRedRequestData) -> StagePayload: ...
 
 
 def build_prompt_ids(
-    tokenizer: PreTrainedTokenizerBase, count: int
+    tokenizer: PreTrainedTokenizerBase, audio_token_count: int
 ) -> tuple[list[int], int, int]:
-    if count < 1:
+    if audio_token_count < 1:
         raise ValueError("Audio must produce at least one token")
     else:
         pass
-    before = tokenizer.encode(PROMPT_PREFIX, add_special_tokens=False)
-    after = tokenizer.encode(PROMPT_SUFFIX, add_special_tokens=False)
-    speech_id = tokenizer.convert_tokens_to_ids(SPEECH_TOKEN)
-    if speech_id is None or speech_id == tokenizer.unk_token_id:
+    prefix_token_ids = tokenizer.encode(PROMPT_PREFIX, add_special_tokens=False)
+    suffix_token_ids = tokenizer.encode(PROMPT_SUFFIX, add_special_tokens=False)
+    speech_token_id = tokenizer.convert_tokens_to_ids(SPEECH_TOKEN)
+    if speech_token_id is None or speech_token_id == tokenizer.unk_token_id:
         raise ValueError("Checkpoint tokenizer is missing the <speech> token")
     else:
         pass
-    return before + [speech_id] * count + after, len(before), speech_id
+    return (
+        prefix_token_ids + [speech_token_id] * audio_token_count + suffix_token_ids,
+        len(prefix_token_ids),
+        speech_token_id,
+    )
 
 
-def make_firered_adapters(
+def make_firered_asr2_scheduler_adapters(
     *,
     tokenizer: PreTrainedTokenizerBase,
     feature_extractor: FireRedFeatureExtractor,
-    max_new_tokens: int = 256,
-    downsample_rate: int = 2,
+    max_new_tokens: int,
+    downsample_rate: int,
 ) -> tuple[FireRedRequestBuilder, FireRedResultAdapter]:
-    eos_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    eos_token_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
 
     def request_builder(payload: StagePayload) -> FireRedRequestData:
         params = payload.request.params or {}
         audio = prepare_audio(
-            payload, source_name="FireRedASR2-LLM", max_duration_s=40.0
+            payload,
+            source_name="FireRedASR2-LLM",
+            max_duration_s=FireRedASR2PipelineConfig.max_native_clip_s,
         )
         feature = feature_extractor(audio.waveform)
-        count = num_audio_tokens(feature.shape[0], downsample_rate)
-        ids, offset, speech_id = build_prompt_ids(tokenizer, count)
-        item = MultimodalDataItem(
+        audio_token_count = num_audio_tokens(feature.shape[0], downsample_rate)
+        input_ids, audio_token_offset, speech_token_id = build_prompt_ids(
+            tokenizer, audio_token_count
+        )
+        audio_item = MultimodalDataItem(
             modality=Modality.AUDIO,
             hash=audio.fingerprint_int,
             feature=feature,
-            model_specific_data={"num_audio_tokens": count},
+            model_specific_data={"num_audio_tokens": audio_token_count},
         )
-        item.set_pad_value()
-        ids = [item.pad_value if token == speech_id else token for token in ids]
-        item.offsets = [(offset, offset + count - 1)]
-        mm = MultimodalInputs(mm_items=[item], num_image_tokens=count)
-        mm.audio_token_id = speech_id
-        requested_limit = params.get("max_new_tokens")
-        limit = int(max_new_tokens if requested_limit is None else requested_limit)
-        if limit < 1:
+        audio_item.set_pad_value()
+        input_ids = [
+            audio_item.pad_value if token == speech_token_id else token
+            for token in input_ids
+        ]
+        audio_item.offsets = [
+            (audio_token_offset, audio_token_offset + audio_token_count - 1)
+        ]
+        multimodal_inputs = MultimodalInputs(
+            mm_items=[audio_item], num_image_tokens=audio_token_count
+        )
+        multimodal_inputs.audio_token_id = speech_token_id
+        requested_max_new_tokens = params.get("max_new_tokens")
+        generation_token_limit = int(
+            max_new_tokens
+            if requested_max_new_tokens is None
+            else requested_max_new_tokens
+        )
+        if generation_token_limit < 1:
             raise ValueError("max_new_tokens must be positive")
         else:
             pass
         temperature = float(params.get("temperature") or 0.0)
-        sampling = SamplingParams(
-            max_new_tokens=limit,
+        sampling_params = SamplingParams(
+            max_new_tokens=generation_token_limit,
             temperature=temperature,
             top_p=float(params.get("top_p", 1.0)),
             repetition_penalty=float(params.get("repetition_penalty", 1.0)),
-            stop_token_ids=[int(eos_id)],
+            stop_token_ids=[int(eos_token_id)],
         )
-        sampling.normalize(tokenizer=None)
+        sampling_params.normalize(tokenizer=None)
         req = Req(
             rid=payload.request_id,
             origin_input_text="",
-            origin_input_ids=ids,
-            sampling_params=sampling,
+            origin_input_ids=input_ids,
+            sampling_params=sampling_params,
             vocab_size=len(tokenizer),
             extra_key=audio.fingerprint,
         )
-        req.multimodal_inputs = mm
+        req.multimodal_inputs = multimodal_inputs
         req._codec_suppress_tokens = (
             None  # noqa: leading-underscore  # Shared runner contract.
         )
         return FireRedRequestData(
-            input_ids=torch.tensor(ids, dtype=torch.long),
+            input_ids=torch.tensor(input_ids, dtype=torch.long),
             req=req,
-            max_new_tokens=limit,
+            max_new_tokens=generation_token_limit,
             temperature=temperature,
             audio_duration_s=audio.duration_s,
             engine_start_s=time.perf_counter(),
             stage_payload=payload,
         )
 
-    def result_adapter(data: FireRedRequestData) -> StagePayload:
-        payload = data.stage_payload
-        text = tokenizer.decode(data.output_ids or [], skip_special_tokens=True).strip()
-        elapsed = time.perf_counter() - data.engine_start_s
+    def result_adapter(request_data: FireRedRequestData) -> StagePayload:
+        payload = request_data.stage_payload
+        text = tokenizer.decode(
+            request_data.output_ids or [], skip_special_tokens=True
+        ).strip()
+        elapsed_seconds = time.perf_counter() - request_data.engine_start_s
         return StagePayload(
             request_id=payload.request_id,
             request=payload.request,
             data={
                 "text": text,
                 "modality": "text",
-                "duration_s": data.audio_duration_s,
-                "asr_latency_s": elapsed,
-                "usage": {"engine_time_s": elapsed},
+                "duration_s": request_data.audio_duration_s,
+                "asr_latency_s": elapsed_seconds,
+                "usage": {"engine_time_s": elapsed_seconds},
             },
         )
 
     return request_builder, result_adapter
 
 
-def make_firered_stream_builder(
+def make_firered_asr2_stream_output_builder(
     tokenizer: PreTrainedTokenizerBase,
 ) -> StreamOutputBuilder[FireRedRequestData]:
     return make_token_text_stream_output_builder(
-        decode_fn=lambda ids: tokenizer.decode(ids, skip_special_tokens=True),
+        decode_fn=lambda input_ids: tokenizer.decode(
+            input_ids, skip_special_tokens=True
+        ),
         build_message_data=lambda delta: {"text": delta, "modality": "text"},
         build_message_metadata=lambda token: {"token_id": token},
         pending_ids_attr="firered_pending_text_ids",

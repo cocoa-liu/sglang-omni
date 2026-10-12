@@ -15,7 +15,7 @@ class ConformerEncoder(nn.Module):
     def __init__(
         self,
         idim: int,
-        n_layers: int,
+        n_layers_enc: int,
         n_head: int,
         d_model: int,
         residual_dropout: float = 0.1,
@@ -27,15 +27,15 @@ class ConformerEncoder(nn.Module):
         self.odim = d_model
 
         self.input_preprocessor = Conv2dSubsampling(idim, d_model)
-        self.positional_encoding = RelPositionalEncoding(d_model)
+        self.positional_encoding = RelPositionalEncoding(d_model, pe_maxlen)
         self.dropout = nn.Dropout(residual_dropout)
 
-        self.layer_stack = nn.ModuleList()
-        for l in range(n_layers):
-            block = RelPosEmbConformerBlock(
+        self.layer_stack = nn.ModuleList(
+            RelPosEmbConformerBlock(
                 d_model, n_head, residual_dropout, dropout_rate, kernel_size
             )
-            self.layer_stack.append(block)
+            for _ in range(n_layers_enc)
+        )
 
     def forward(
         self, padded_input: torch.Tensor, input_lengths: torch.Tensor, pad: bool = True
@@ -49,30 +49,27 @@ class ConformerEncoder(nn.Module):
             )
         else:
             pass
-        src_mask = self.padding_position_is_0(padded_input, input_lengths)
-
-        embed_output, input_lengths, src_mask = self.input_preprocessor(
-            padded_input, src_mask
-        )
-        enc_output = self.dropout(embed_output)
-
-        pos_emb = self.dropout(self.positional_encoding(embed_output))
-
-        for enc_layer in self.layer_stack:
-            enc_output = enc_layer(
-                enc_output, pos_emb, slf_attn_mask=src_mask, pad_mask=src_mask
-            )
-
-        return enc_output, input_lengths, src_mask
-
-    def padding_position_is_0(
-        self, padded_input: torch.Tensor, input_lengths: torch.Tensor
-    ) -> torch.Tensor:
-        time = padded_input.size(1)
-        return (
-            torch.arange(time, device=padded_input.device)[None, :]
+        padding_mask = (
+            torch.arange(padded_input.size(1), device=padded_input.device)[None, :]
             < input_lengths.to(padded_input.device)[:, None]
         ).unsqueeze(1)
+
+        embeddings, input_lengths, padding_mask = self.input_preprocessor(
+            padded_input, padding_mask
+        )
+        encoder_output = self.dropout(embeddings)
+
+        position_embeddings = self.dropout(self.positional_encoding(embeddings))
+
+        for encoder_layer in self.layer_stack:
+            encoder_output = encoder_layer(
+                encoder_output,
+                position_embeddings,
+                slf_attn_mask=padding_mask,
+                pad_mask=padding_mask,
+            )
+
+        return encoder_output, input_lengths, padding_mask
 
 
 class RelPosEmbConformerBlock(nn.Module):
@@ -94,12 +91,12 @@ class RelPosEmbConformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        pos_emb: torch.Tensor,
+        position_embeddings: torch.Tensor,
         slf_attn_mask: torch.Tensor | None = None,
         pad_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         out = 0.5 * x + 0.5 * self.ffn1(x)
-        out = self.mhsa(out, out, out, pos_emb, mask=slf_attn_mask)[0]
+        out = self.mhsa(out, out, out, position_embeddings, mask=slf_attn_mask)[0]
         out = self.conv(out, pad_mask)
         out = 0.5 * out + 0.5 * self.ffn2(out)
         out = self.layer_norm(out)
@@ -123,17 +120,17 @@ class Conv2dSubsampling(nn.Module):
         subsample_idim = ((idim - 1) // 2 - 1) // 2
         self.out = nn.Linear(out_channels * subsample_idim, d_model)
 
-        self.subsampling = 4
-        left_context = right_context = 3  # both exclude currect frame
-        self.context = left_context + 1 + right_context  # 7
+        self.context = 7
 
     def forward(
         self, x: torch.Tensor, x_mask: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x = x.unsqueeze(1)
         x = self.conv(x)
-        N, C, T, D = x.size()
-        x = self.out(x.transpose(1, 2).contiguous().view(N, T, C * D))
+        batch_size, channels, frames, features = x.size()
+        x = self.out(
+            x.transpose(1, 2).contiguous().view(batch_size, frames, channels * features)
+        )
         mask = x_mask[:, :, :-2:2][:, :, :-2:2]
         input_lengths = mask[:, -1, :].sum(dim=-1)
         return x, input_lengths, mask
@@ -160,9 +157,13 @@ class RelPositionalEncoding(torch.nn.Module):
         self.register_buffer("pe", pe)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        Tmax, T = self.pe.size(1), x.size(1)
-        pos_emb = self.pe[:, Tmax // 2 - T + 1 : Tmax // 2 + T].clone().detach()
-        return pos_emb
+        max_positions, frames = self.pe.size(1), x.size(1)
+        position_embeddings = (
+            self.pe[:, max_positions // 2 - frames + 1 : max_positions // 2 + frames]
+            .clone()
+            .detach()
+        )
+        return position_embeddings
 
 
 class ConformerFeedForward(nn.Module):
@@ -200,7 +201,6 @@ class ConformerConvolution(nn.Module):
         self.pointwise_conv1 = nn.Conv1d(
             d_model, d_model * 4, kernel_size=1, bias=False
         )
-        self.glu = F.glu
         self.padding = (kernel_size - 1) // 2
         self.depthwise_conv = nn.Conv1d(
             d_model * 2,
@@ -263,49 +263,41 @@ class EncoderMultiHeadAttention(nn.Module):
         self.layer_norm_k = nn.LayerNorm(d_model)
         self.layer_norm_v = nn.LayerNorm(d_model)
 
-        self.attention = ScaledDotProductAttention(temperature=self.d_k**0.5)
+        self.attention = ScaledDotProductAttention()
         self.fc = nn.Linear(n_head * self.d_v, d_model, bias=False)
         self.dropout = nn.Dropout(residual_dropout)
-
-    def forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        sz_b, len_q = q.size(0), q.size(1)
-
-        residual = q
-        q, k, v = self.forward_qkv(q, k, v)
-
-        output, attn = self.attention(q, k, v, mask=mask)
-
-        output = self.forward_output(output, residual, sz_b, len_q)
-        return output, attn
 
     def forward_qkv(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         d_k, d_v, n_head = self.d_k, self.d_v, self.n_head
-        sz_b, len_q, len_k, len_v = q.size(0), q.size(1), k.size(1), v.size(1)
+        batch_size, query_length, key_length, value_length = (
+            q.size(0),
+            q.size(1),
+            k.size(1),
+            v.size(1),
+        )
 
         q = self.layer_norm_q(q)
         k = self.layer_norm_k(k)
         v = self.layer_norm_v(v)
 
-        q = self.w_qs(q).view(sz_b, len_q, n_head, d_k)
-        k = self.w_ks(k).view(sz_b, len_k, n_head, d_k)
-        v = self.w_vs(v).view(sz_b, len_v, n_head, d_v)
+        q = self.w_qs(q).view(batch_size, query_length, n_head, d_k)
+        k = self.w_ks(k).view(batch_size, key_length, n_head, d_k)
+        v = self.w_vs(v).view(batch_size, value_length, n_head, d_v)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
         return q, k, v
 
     def forward_output(
-        self, output: torch.Tensor, residual: torch.Tensor, sz_b: int, len_q: int
+        self,
+        output: torch.Tensor,
+        residual: torch.Tensor,
+        batch_size: int,
+        query_length: int,
     ) -> torch.Tensor:
-        output = output.transpose(1, 2).contiguous().view(sz_b, len_q, -1)
+        output = output.transpose(1, 2).contiguous().view(batch_size, query_length, -1)
         fc_out = self.fc(output)
         output = self.dropout(fc_out)
         output = output + residual
@@ -313,38 +305,31 @@ class EncoderMultiHeadAttention(nn.Module):
 
 
 class ScaledDotProductAttention(nn.Module):
-    def __init__(self, temperature: float) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.temperature = temperature
         self.dropout = nn.Dropout(0.0)
         self.INF = float("inf")
 
-    def forward(
+    def forward_attention(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
+        attention_weights: torch.Tensor,
         v: torch.Tensor,
         mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        attn = torch.matmul(q, k.transpose(2, 3)) / self.temperature
-        output, attn = self.forward_attention(attn, v, mask)
-        return output, attn
-
-    def forward_attention(
-        self, attn: torch.Tensor, v: torch.Tensor, mask: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if mask is not None:
             mask = mask.unsqueeze(1)
             mask = mask.eq(0)
-            attn = attn.masked_fill(mask, -self.INF)
-            attn = torch.softmax(attn, dim=-1).masked_fill(mask, 0.0)
+            attention_weights = attention_weights.masked_fill(mask, -self.INF)
+            attention_weights = torch.softmax(attention_weights, dim=-1).masked_fill(
+                mask, 0.0
+            )
         else:
-            attn = torch.softmax(attn, dim=-1)
+            attention_weights = torch.softmax(attention_weights, dim=-1)
 
-        d_attn = self.dropout(attn)
-        output = torch.matmul(d_attn, v)
+        dropped_attention_weights = self.dropout(attention_weights)
+        output = torch.matmul(dropped_attention_weights, v)
 
-        return output, attn
+        return output, attention_weights
 
 
 class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
@@ -362,11 +347,13 @@ class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
         torch.nn.init.xavier_uniform_(self.pos_bias_v)
 
     def relative_shift(self, x: torch.Tensor) -> torch.Tensor:
-        N, H, T1, T2 = x.size()
-        zero_pad = torch.zeros((N, H, T1, 1), device=x.device, dtype=x.dtype)
+        batch_size, heads, query_length, key_length = x.size()
+        zero_pad = torch.zeros(
+            (batch_size, heads, query_length, 1), device=x.device, dtype=x.dtype
+        )
         x_padded = torch.cat([zero_pad, x], dim=-1)
 
-        x_padded = x_padded.view(N, H, T2 + 1, T1)
+        x_padded = x_padded.view(batch_size, heads, key_length + 1, query_length)
         x = x_padded[:, :, 1:].view_as(x)
         x = x[:, :, :, : x.size(-1) // 2 + 1]
         return x
@@ -376,17 +363,19 @@ class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        pos_emb: torch.Tensor,
+        position_embeddings: torch.Tensor,
         mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        sz_b, len_q = q.size(0), q.size(1)
+        batch_size, query_length = q.size(0), q.size(1)
 
         residual = q
         q, k, v = self.forward_qkv(q, k, v)
 
         q = q.transpose(1, 2)
-        n_batch_pos = pos_emb.size(0)
-        p = self.linear_pos(pos_emb).view(n_batch_pos, -1, self.n_head, self.d_k)
+        position_batch_size = position_embeddings.size(0)
+        p = self.linear_pos(position_embeddings).view(
+            position_batch_size, -1, self.n_head, self.d_k
+        )
         p = p.transpose(1, 2)
 
         q_with_bias_u = (q + self.pos_bias_u).transpose(1, 2)
@@ -397,10 +386,12 @@ class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
         matrix_bd = torch.matmul(q_with_bias_v, p.transpose(-2, -1))
         matrix_bd = self.relative_shift(matrix_bd)
 
-        attn_scores = matrix_ac + matrix_bd
-        attn_scores.mul_(self.scale)
+        attention_scores = matrix_ac + matrix_bd
+        attention_scores.mul_(self.scale)
 
-        output, attn = self.attention.forward_attention(attn_scores, v, mask=mask)
+        output, attention_weights = self.attention.forward_attention(
+            attention_scores, v, mask=mask
+        )
 
-        output = self.forward_output(output, residual, sz_b, len_q)
-        return output, attn
+        output = self.forward_output(output, residual, batch_size, query_length)
+        return output, attention_weights
