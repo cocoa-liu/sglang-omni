@@ -12,12 +12,50 @@ import numpy as np
 import pytest
 import soundfile as sf
 
+from benchmarks.benchmarker.utils import get_wav_duration
 from benchmarks.dataset import asr_longform, prepare, seedtts, stt_benchmark
 from benchmarks.eval import (
     benchmark_asr_longform,
     benchmark_asr_seedtts,
     benchmark_asr_stt_benchmark,
 )
+
+
+@pytest.mark.parametrize("sample_rate", [16000, 48000])
+@pytest.mark.parametrize("channels", [1, 2])
+@pytest.mark.parametrize("subtype", ["PCM_16", "FLOAT"])
+@pytest.mark.parametrize("metadata_position", ["before_format", "after_audio"])
+def test_wav_duration_excludes_metadata(
+    sample_rate: int, channels: int, subtype: str, metadata_position: str
+) -> None:
+    buffer = io.BytesIO()
+    sf.write(
+        buffer,
+        np.zeros((sample_rate // 4, channels), dtype=np.float32),
+        sample_rate,
+        format="WAV",
+        subtype=subtype,
+    )
+    encoded = buffer.getvalue()
+    metadata = b"JUNK" + struct.pack("<I", 2048) + bytes(2048)
+    offset = 12 if metadata_position == "before_format" else len(encoded)
+    encoded = encoded[:offset] + metadata + encoded[offset:]
+    encoded = encoded[:4] + struct.pack("<I", len(encoded) - 8) + encoded[8:]
+    assert get_wav_duration(encoded) == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize("encoded", [b"", b"RIFF", bytes(80)])
+def test_invalid_wav_has_no_duration(encoded: bytes) -> None:
+    assert get_wav_duration(encoded) == 0.0
+
+
+def test_streamed_wav_duration_uses_available_frames() -> None:
+    buffer = io.BytesIO()
+    sf.write(buffer, np.zeros(1600), 16000, format="WAV", subtype="PCM_16")
+    encoded = bytearray(buffer.getvalue())
+    struct.pack_into("<I", encoded, 4, 0xFFFFFFFF)
+    struct.pack_into("<I", encoded, encoded.index(b"data") + 4, 0xFFFFFFFF)
+    assert get_wav_duration(bytes(encoded)) == pytest.approx(0.1)
 
 
 class FakeDataset:

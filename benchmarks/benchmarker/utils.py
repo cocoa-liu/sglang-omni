@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
 import signal
 import socket
-import struct
 import subprocess
 import sys
 import threading
@@ -18,6 +18,7 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import requests as requests_lib
+import soundfile as sf
 
 logger = logging.getLogger(__name__)
 
@@ -370,16 +371,11 @@ def _ensure_port_available(host: str, port: int) -> None:
 
 def get_wav_duration(wav_bytes: bytes) -> float:
     """Return PCM playback length in seconds for raw WAV bytes."""
-    if len(wav_bytes) <= WAV_HEADER_SIZE:
+    try:
+        # note (cocoa00): WAV metadata chunks must not count as audio frames.
+        return sf.info(io.BytesIO(wav_bytes)).duration
+    except (RuntimeError, ValueError):
         return 0.0
-    sample_rate = struct.unpack_from("<I", wav_bytes, 24)[0]
-    num_channels = struct.unpack_from("<H", wav_bytes, 22)[0]
-    bits_per_sample = struct.unpack_from("<H", wav_bytes, 34)[0]
-    if sample_rate == 0 or num_channels == 0 or bits_per_sample == 0:
-        return 0.0
-    bytes_per_sample = num_channels * bits_per_sample // 8
-    pcm_size = len(wav_bytes) - WAV_HEADER_SIZE
-    return pcm_size / (sample_rate * bytes_per_sample)
 
 
 def parse_sse_event(line: str) -> dict | None:
