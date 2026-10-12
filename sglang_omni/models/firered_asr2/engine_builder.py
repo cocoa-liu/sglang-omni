@@ -27,9 +27,20 @@ class FireRedASR2EngineBuilder(AsrEngineBuilder[FireRedRequestData]):
     model_arch_override = "FireRedASR2ForConditionalGeneration"
     context_length = 4096
 
-    def __init__(self, *, max_new_tokens: int, max_running_requests: int) -> None:
+    def __init__(
+        self,
+        *,
+        max_new_tokens: int,
+        max_running_requests: int,
+        mm_embedding_cache_size_bytes: int,
+    ) -> None:
+        if mm_embedding_cache_size_bytes < 0:
+            raise ValueError("mm_embedding_cache_size_bytes must be nonnegative")
+        else:
+            pass
         self.max_new_tokens = max_new_tokens
         self.max_running_requests = max_running_requests
+        self.mm_embedding_cache_size_bytes = mm_embedding_cache_size_bytes
 
     def resolve_checkpoint(self, model_path: str) -> str:
         return resolve_checkpoint(model_path)
@@ -75,7 +86,7 @@ class FireRedASR2EngineBuilder(AsrEngineBuilder[FireRedRequestData]):
         generation_cuda_graph_enabled: bool,
     ) -> None:
         # note (cocoa00): Local model registration bypasses SGLang multimodal cache setup.
-        init_mm_embedding_cache(256 * 1024 * 1024)
+        init_mm_embedding_cache(self.mm_embedding_cache_size_bytes)
 
     def extra_scheduler_kwargs(self) -> SchedulerExtras[FireRedRequestData]:
         return {

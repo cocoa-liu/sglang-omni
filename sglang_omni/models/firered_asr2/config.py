@@ -31,7 +31,11 @@ class FireRedASR2PipelineConfig(PipelineConfig):
                 name="asr",
                 process="asr",
                 factory_path="sglang_omni.models.firered_asr2.stages.create_firered_asr2_executor",
-                factory=FactoryArgs(dtype="bfloat16", max_new_tokens=256),
+                factory=FactoryArgs(
+                    dtype="bfloat16",
+                    max_new_tokens=256,
+                    mm_embedding_cache_size_bytes=256 * 1024 * 1024,
+                ),
                 engine=EngineArgs(max_running_requests=8),
                 gpu=0,
                 terminal=True,

@@ -12,6 +12,7 @@ from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 def create_firered_asr2_executor(
     model_path: str,
     *,
+    mm_embedding_cache_size_bytes: int,
     device: str | None = None,
     gpu_id: int | None = None,
     dtype: str = "bfloat16",
@@ -23,6 +24,7 @@ def create_firered_asr2_executor(
     return FireRedASR2EngineBuilder(
         max_new_tokens=max_new_tokens,
         max_running_requests=max_running_requests,
+        mm_embedding_cache_size_bytes=mm_embedding_cache_size_bytes,
     ).build(
         model_path,
         device=device,
