@@ -50,7 +50,7 @@ async def test_interleaved_cadences_input_during_output_eos_and_disconnect(linea
     await output_a.aclose()
     await output_b.aclose()
     assert not coordinator.sessions
-    assert not coordinator._requests
+    assert not coordinator.requests
 
 
 @pytest.mark.asyncio
@@ -167,13 +167,20 @@ async def test_next_input_is_accepted_while_one_unit_is_in_flight(
         *,
         owner: str | None = None,
         chunk: TimedChunk | None = None,
+        request_id: str | None = None,
     ) -> None:
         if operation == "append" and chunk is not None:
             append_seqs.append(chunk.seq)
             if chunk.seq == 0:
                 entered.set()
                 await release.wait()
-        return await original(session, operation, owner=owner, chunk=chunk)
+        return await original(
+            session,
+            operation,
+            owner=owner,
+            chunk=chunk,
+            request_id=request_id,
+        )
 
     monkeypatch.setattr(coordinator, "session_operation", hold_first_append)
     outputs = coordinator.session_outputs(session_identity)

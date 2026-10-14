@@ -14,14 +14,14 @@ on:
       - .github/workflows/release-docker-npu-nightly.yml
   workflow_dispatch:
   schedule:
-    - cron: '0 14 * * *' # 22:00 Beijing time
+    - cron: '0 9 * * *' # 17:00 Beijing time
 
 permissions:
   contents: read
 
 jobs:
   build:
-    if: github.event_name != 'schedule' || vars.NPU_DOCKER_PUBLISH_ENABLED == 'true'
+    if: github.event_name != 'schedule' || github.repository == 'sgl-project/sglang-omni'
     uses: ./.github/workflows/release-docker-npu.yml
     with:
       image_tag: main

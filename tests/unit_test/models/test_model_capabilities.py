@@ -16,6 +16,15 @@ from sglang_omni.models.model_capabilities import (
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
 
 EXPECTED_MODEL_CAPABILITIES = {
+    "FishOmniModel": ModelCapabilities(
+        supports_reference_audio=True,
+        supports_batch_vocoder=True,
+        supports_streaming_vocoder=True,
+        supports_cuda_graph=True,
+        supports_torch_compile=False,
+        supports_breakable_prefill_cuda_graph=True,
+        supports_full_prefill_cuda_graph=False,
+    ),
     "DotsTTSForConditionalGeneration": ModelCapabilities(
         supports_reference_audio=True,
         supports_batch_vocoder=True,
@@ -23,6 +32,7 @@ EXPECTED_MODEL_CAPABILITIES = {
         supports_cuda_graph=False,
         supports_torch_compile=True,
         supports_breakable_prefill_cuda_graph=False,
+        supports_full_prefill_cuda_graph=False,
     ),
     "MiniMaxMusic3ForConditionalGeneration": ModelCapabilities(
         supports_reference_audio=False,
@@ -31,6 +41,7 @@ EXPECTED_MODEL_CAPABILITIES = {
         supports_cuda_graph=True,
         supports_torch_compile=True,
         supports_breakable_prefill_cuda_graph=False,
+        supports_full_prefill_cuda_graph=False,
     ),
     "AudarTTSForConditionalGeneration": ModelCapabilities(
         supports_reference_audio=True,
@@ -39,6 +50,7 @@ EXPECTED_MODEL_CAPABILITIES = {
         supports_cuda_graph=False,
         supports_torch_compile=False,
         supports_breakable_prefill_cuda_graph=False,
+        supports_full_prefill_cuda_graph=False,
     ),
     "Qwen3TTSForConditionalGeneration": ModelCapabilities(
         supports_reference_audio=True,
@@ -47,6 +59,7 @@ EXPECTED_MODEL_CAPABILITIES = {
         supports_cuda_graph=True,
         supports_torch_compile=False,
         supports_breakable_prefill_cuda_graph=True,
+        supports_full_prefill_cuda_graph=True,
     ),
     "HiggsMultimodalQwen3ForConditionalGeneration": ModelCapabilities(
         supports_reference_audio=True,
@@ -55,6 +68,7 @@ EXPECTED_MODEL_CAPABILITIES = {
         supports_cuda_graph=True,
         supports_torch_compile=True,
         supports_breakable_prefill_cuda_graph=True,
+        supports_full_prefill_cuda_graph=False,
     ),
     "MossTTSDelayModel": ModelCapabilities(
         supports_reference_audio=True,
@@ -63,6 +77,7 @@ EXPECTED_MODEL_CAPABILITIES = {
         supports_cuda_graph=True,
         supports_torch_compile=False,
         supports_breakable_prefill_cuda_graph=True,
+        supports_full_prefill_cuda_graph=False,
     ),
     "MossTTSLocalModel": ModelCapabilities(
         supports_reference_audio=True,
@@ -71,6 +86,7 @@ EXPECTED_MODEL_CAPABILITIES = {
         supports_cuda_graph=True,
         supports_torch_compile=True,
         supports_breakable_prefill_cuda_graph=False,
+        supports_full_prefill_cuda_graph=False,
     ),
     "FishQwen3OmniForCausalLM": ModelCapabilities(
         supports_reference_audio=True,
@@ -79,6 +95,7 @@ EXPECTED_MODEL_CAPABILITIES = {
         supports_cuda_graph=True,
         supports_torch_compile=True,
         supports_breakable_prefill_cuda_graph=False,
+        supports_full_prefill_cuda_graph=False,
     ),
     "BailingMMNativeForConditionalGeneration": ModelCapabilities(
         supports_reference_audio=True,
@@ -87,6 +104,7 @@ EXPECTED_MODEL_CAPABILITIES = {
         supports_cuda_graph=True,
         supports_torch_compile=False,
         supports_breakable_prefill_cuda_graph=False,
+        supports_full_prefill_cuda_graph=False,
     ),
     "VoxtralTTSForConditionalGeneration": ModelCapabilities(
         supports_reference_audio=False,
@@ -95,6 +113,7 @@ EXPECTED_MODEL_CAPABILITIES = {
         supports_cuda_graph=True,
         supports_torch_compile=True,
         supports_breakable_prefill_cuda_graph=False,
+        supports_full_prefill_cuda_graph=False,
     ),
     "Zonos2ForCausalLM": ModelCapabilities(
         supports_reference_audio=True,
@@ -103,6 +122,7 @@ EXPECTED_MODEL_CAPABILITIES = {
         supports_cuda_graph=True,
         supports_torch_compile=True,
         supports_breakable_prefill_cuda_graph=False,
+        supports_full_prefill_cuda_graph=False,
     ),
     "MossTranscribeDiarizeForConditionalGeneration": ModelCapabilities(
         supports_reference_audio=False,
@@ -111,17 +131,18 @@ EXPECTED_MODEL_CAPABILITIES = {
         supports_cuda_graph=True,
         supports_torch_compile=True,
         supports_breakable_prefill_cuda_graph=True,
+        supports_full_prefill_cuda_graph=False,
     ),
 }
 
 
-def _package_for_architecture(architecture: str):
+def package_for_architecture(architecture: str):
     config_cls = PIPELINE_CONFIG_REGISTRY.configs.get(architecture)
     assert config_cls is not None, f"{architecture} is not registered"
     return importlib.import_module(config_cls.__module__.rsplit(".", 1)[0])
 
 
-def _capability_required_architectures() -> set[str]:
+def capability_required_architectures() -> set[str]:
     return {
         config_cls.architecture
         for config_cls in set(PIPELINE_CONFIG_REGISTRY.configs.values())
@@ -130,11 +151,11 @@ def _capability_required_architectures() -> set[str]:
 
 
 def test_expected_capabilities_cover_registered_required_configs() -> None:
-    assert _capability_required_architectures() == set(EXPECTED_MODEL_CAPABILITIES)
+    assert capability_required_architectures() == set(EXPECTED_MODEL_CAPABILITIES)
 
 
 def test_required_model_capability_configs_resolve_capabilities() -> None:
-    for architecture in sorted(_capability_required_architectures()):
+    for architecture in sorted(capability_required_architectures()):
         assert get_model_capabilities(architecture) is not None
 
 
@@ -154,7 +175,7 @@ def test_model_capabilities_are_frozen_and_explicit() -> None:
 
 @pytest.mark.parametrize("architecture", EXPECTED_MODEL_CAPABILITIES)
 def test_model_package_exports_capabilities(architecture: str) -> None:
-    module = _package_for_architecture(architecture)
+    module = package_for_architecture(architecture)
     capabilities = getattr(module, "CAPABILITIES", None)
 
     assert capabilities == EXPECTED_MODEL_CAPABILITIES[architecture]
@@ -232,6 +253,7 @@ def test_launcher_model_capabilities_log_summary() -> None:
         "cuda_graph": True,
         "torch_compile": False,
         "breakable_prefill_cuda_graph": True,
+        "full_prefill_cuda_graph": True,
     }
 
 

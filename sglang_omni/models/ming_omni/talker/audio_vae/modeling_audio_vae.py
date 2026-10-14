@@ -18,11 +18,13 @@ class AudioVAE(PreTrainedModel):
         super().__init__(config)
         encoder_args = config.enc_kwargs["backbone"]
         decoder_args = config.dec_kwargs["backbone"]
-        if current_platform.is_npu():
+        if current_platform.is_npu() or current_platform.is_xpu():
             # Transformers' NPU FA2 ignores sliding windows, corrupting long
             # reference audio. SDPA preserves the VAE's attention masks.
             encoder_args = {**encoder_args, "_attn_implementation": "sdpa"}
             decoder_args = {**decoder_args, "_attn_implementation": "sdpa"}
+        else:
+            pass
         self.encoder = Encoder(
             encoder_args=encoder_args,
             input_dim=config.enc_kwargs["input_dim"],
@@ -52,10 +54,16 @@ class AudioVAE(PreTrainedModel):
 
             if module.bias is not None:
                 module.bias.data.zero_()
+            else:
+                pass
         elif isinstance(module, nn.Embedding):
             module.weight.data.normal_(mean=0.0, std=std)
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
+            else:
+                pass
+        else:
+            pass
 
     def encode_latent(self, waveform, waveform_length):
         """
@@ -74,6 +82,8 @@ class AudioVAE(PreTrainedModel):
         ).to(torch.int32)
         if self.config.patch_size != -1:
             frame_num = torch.ceil(frame_num / self.config.patch_size)
+        else:
+            pass
         h, y = self.encoder(waveform)
         h = h.transpose(1, 2)  # [B, d, T]
 

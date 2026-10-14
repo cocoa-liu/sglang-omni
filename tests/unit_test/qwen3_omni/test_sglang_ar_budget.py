@@ -4,12 +4,13 @@ from __future__ import annotations
 import logging
 import subprocess
 import sys
+from collections.abc import Iterator
 from types import SimpleNamespace
 
 import pytest
 from sglang.srt.arg_groups.model_override_base import resolved_view
 from sglang.srt.mem_cache.kv_cache_configurator import KVCacheConfigurator
-from sglang.srt.runtime_context import get_context
+from sglang.srt.runtime_context import get_context, get_schedule
 
 import sglang_omni.model_runner.sglang_model_runner as runner_mod
 import sglang_omni.models.qwen3_omni.bootstrap as qwen_bootstrap
@@ -18,33 +19,33 @@ from sglang_omni.platforms import current_platform
 
 
 @pytest.fixture(autouse=True)
-def _schedule_bag(monkeypatch):
+def schedule_bag(monkeypatch):
     monkeypatch.setattr(
         runner_mod, "get_schedule", lambda: SimpleNamespace(mem_fraction_static=0.9)
     )
 
 
-_PUBLISHED: list = []
+PUBLISHED: list = []
 
 
 @pytest.fixture(autouse=True)
-def _restore_published_context():
+def restore_published_context():
     yield
-    while _PUBLISHED:
-        _PUBLISHED.pop().restore()
+    while PUBLISHED:
+        PUBLISHED.pop().restore()
 
 
-def _publish_for(server_args) -> object:
+def publish_for(server_args) -> object:
     """Stand in for the scheduler construction, which publishes the record."""
     published = get_context().override_server_args(
         mem_fraction_static=resolved_view(server_args).mem_fraction_static
     )
     published.install()
-    _PUBLISHED.append(published)
+    PUBLISHED.append(published)
     return object()
 
 
-def _configurator(
+def make_configurator(
     *, total_gpu_memory_fraction: float | None, kv_cache_bytes: int | None = None
 ):
     """Build the profiling surface without upstream's full field set.
@@ -64,41 +65,47 @@ def _configurator(
 
 
 def test_kv_cache_bytes_budget_is_returned_verbatim(monkeypatch) -> None:
-    configurator = _configurator(
+    configurator = make_configurator(
         total_gpu_memory_fraction=None, kv_cache_bytes=2 * 1024**3
     )
     monkeypatch.setattr(
         runner_mod, "free_gpu_memory_bytes", lambda device, gpu_id: 50 * 1024**3
     )
 
-    assert configurator._profile_available_bytes(0) == 2 * 1024**3
+    assert (
+        configurator._profile_available_bytes(0) == 2 * 1024**3
+    )  # noqa: leading-underscore  # production name
 
 
 def test_kv_cache_bytes_budget_wins_over_stage_fraction(monkeypatch) -> None:
-    configurator = _configurator(
+    configurator = make_configurator(
         total_gpu_memory_fraction=0.4, kv_cache_bytes=2 * 1024**3
     )
     monkeypatch.setattr(
         runner_mod, "free_gpu_memory_bytes", lambda device, gpu_id: 50 * 1024**3
     )
 
-    assert configurator._profile_available_bytes(0) == 2 * 1024**3
+    assert (
+        configurator._profile_available_bytes(0) == 2 * 1024**3
+    )  # noqa: leading-underscore  # production name
 
 
 def test_kv_cache_bytes_rejects_mambaish_models() -> None:
     """The byte branch bypasses upstream's mamba cache derivation; it must
     refuse instead of booting a mamba model with the cache never sized."""
-    configurator = _configurator(
+    configurator = make_configurator(
         total_gpu_memory_fraction=None, kv_cache_bytes=2 * 1024**3
     )
     configurator.mambaish_config = object()
 
     with pytest.raises(ValueError, match="mamba"):
-        configurator._profile_available_bytes(0)
+        configurator._profile_available_bytes(
+            0
+        )  # noqa: leading-underscore  # production name
 
 
 def test_kv_cache_bytes_over_free_memory_raises_actionable_error(monkeypatch) -> None:
-    configurator = _configurator(
+    configurator = make_configurator(
         total_gpu_memory_fraction=None, kv_cache_bytes=8 * 1024**3
     )
     monkeypatch.setattr(
@@ -106,7 +113,9 @@ def test_kv_cache_bytes_over_free_memory_raises_actionable_error(monkeypatch) ->
     )
 
     with pytest.raises(ValueError) as exc_info:
-        configurator._profile_available_bytes(0)
+        configurator._profile_available_bytes(
+            0
+        )  # noqa: leading-underscore  # production name
 
     message = str(exc_info.value)
     assert "8.00GiB" in message
@@ -118,15 +127,15 @@ def test_post_capture_resize_shrinking_a_byte_budget_raises(monkeypatch) -> None
     from sglang.srt.model_executor.model_runner import ModelRunner
 
     runner = runner_mod.SGLModelRunner.__new__(runner_mod.SGLModelRunner)
-    runner._kv_cache_bytes = 4 * 1024**3
+    runner.kv_cache_bytes = 4 * 1024**3
     runner.max_total_num_tokens = 1000
     runner.gpu_id = 0
     runner.device = "cuda"
 
-    def _shrinking_resize(self):
+    def shrinking_resize(self):
         self.max_total_num_tokens = 600
 
-    monkeypatch.setattr(ModelRunner, "post_capture_resize_kv_pool", _shrinking_resize)
+    monkeypatch.setattr(ModelRunner, "post_capture_resize_kv_pool", shrinking_resize)
     monkeypatch.setattr(
         runner_mod, "free_gpu_memory_bytes", lambda device, gpu_id: 1024**3
     )
@@ -144,7 +153,7 @@ def test_post_capture_resize_without_byte_budget_delegates(monkeypatch) -> None:
     from sglang.srt.model_executor.model_runner import ModelRunner
 
     runner = runner_mod.SGLModelRunner.__new__(runner_mod.SGLModelRunner)
-    runner._kv_cache_bytes = None
+    runner.kv_cache_bytes = None
     runner.max_total_num_tokens = 1000
     calls: list[str] = []
 
@@ -163,7 +172,7 @@ def test_post_capture_resize_preserving_byte_budget_passes(monkeypatch) -> None:
     from sglang.srt.model_executor.model_runner import ModelRunner
 
     runner = runner_mod.SGLModelRunner.__new__(runner_mod.SGLModelRunner)
-    runner._kv_cache_bytes = 4 * 1024**3
+    runner.kv_cache_bytes = 4 * 1024**3
     runner.max_total_num_tokens = 1000
 
     monkeypatch.setattr(ModelRunner, "post_capture_resize_kv_pool", lambda self: None)
@@ -171,12 +180,12 @@ def test_post_capture_resize_preserving_byte_budget_passes(monkeypatch) -> None:
     runner.post_capture_resize_kv_pool()
 
 
-def _patch_thinker_startup(monkeypatch) -> list[dict[str, object]]:
+def patch_thinker_startup(monkeypatch) -> list[dict[str, object]]:
     scheduler_calls: list[dict[str, object]] = []
 
-    def _fake_server_args_builder(model_path, context_length, **overrides):
+    def fake_server_args_builder(model_path, context_length, **overrides):
         assert model_path == "dummy"
-        assert context_length == 8192
+        assert context_length is None
         assert overrides["sampling_backend"] == "pytorch"
         return SimpleNamespace(
             mem_fraction_static=overrides["mem_fraction_static"],
@@ -196,7 +205,7 @@ def _patch_thinker_startup(monkeypatch) -> list[dict[str, object]]:
             torch_compile_max_bs=overrides["torch_compile_max_bs"],
         )
 
-    def _fake_create_thinker_scheduler(server_args, gpu_id, **kwargs):
+    def fake_create_thinker_scheduler(server_args, gpu_id, **kwargs):
         scheduler_calls.append(
             {
                 "mem_fraction_static": server_args.mem_fraction_static,
@@ -205,17 +214,17 @@ def _patch_thinker_startup(monkeypatch) -> list[dict[str, object]]:
                 "total_gpu_memory_fraction": kwargs["total_gpu_memory_fraction"],
             }
         )
-        return _publish_for(server_args)
+        return publish_for(server_args)
 
     monkeypatch.setattr(
         qwen_stages,
         "build_sglang_server_args",
-        _fake_server_args_builder,
+        fake_server_args_builder,
     )
     monkeypatch.setattr(
         qwen_stages,
         "create_thinker_scheduler",
-        _fake_create_thinker_scheduler,
+        fake_create_thinker_scheduler,
     )
     monkeypatch.setattr(qwen_stages, "avail_gpu_mem", lambda gpu_id: 90.0)
     monkeypatch.setattr(
@@ -227,7 +236,7 @@ def _patch_thinker_startup(monkeypatch) -> list[dict[str, object]]:
 
 
 def test_colocated_ar_budget_uses_stage_total_fraction(monkeypatch) -> None:
-    configurator = _configurator(total_gpu_memory_fraction=0.4)
+    configurator = make_configurator(total_gpu_memory_fraction=0.4)
     monkeypatch.setattr(
         runner_mod,
         "get_process_gpu_memory_bytes",
@@ -239,7 +248,9 @@ def test_colocated_ar_budget_uses_stage_total_fraction(monkeypatch) -> None:
         lambda gpu_id: SimpleNamespace(total_memory_bytes=100 * 1024**3),
     )
 
-    available = configurator._profile_available_bytes(0)
+    available = configurator._profile_available_bytes(
+        0
+    )  # noqa: leading-underscore  # production name
 
     assert available == 10 * 1024**3
 
@@ -249,7 +260,7 @@ def test_colocated_ar_budget_uses_stage_load_delta_when_process_memory_unavailab
     monkeypatch,
     process_memory,
 ) -> None:
-    configurator = _configurator(total_gpu_memory_fraction=0.4)
+    configurator = make_configurator(total_gpu_memory_fraction=0.4)
     monkeypatch.setattr(
         runner_mod,
         "get_process_gpu_memory_bytes",
@@ -261,7 +272,7 @@ def test_colocated_ar_budget_uses_stage_load_delta_when_process_memory_unavailab
         lambda gpu_id: SimpleNamespace(total_memory_bytes=100 * 1024**3),
     )
 
-    def _fake_stage_load_delta(self, pre_model_load_memory, total_memory):
+    def fake_stage_load_delta(self, pre_model_load_memory, total_memory):
         assert pre_model_load_memory == 95.0
         assert total_memory == 100 * 1024**3
         return 7 * 1024**3
@@ -269,28 +280,149 @@ def test_colocated_ar_budget_uses_stage_load_delta_when_process_memory_unavailab
     monkeypatch.setattr(
         runner_mod.OmniKVCacheConfigurator,
         "profile_available_bytes_from_stage_load_delta",
-        _fake_stage_load_delta,
+        fake_stage_load_delta,
     )
 
-    assert configurator._profile_available_bytes(95.0) == 7 * 1024**3
+    assert (
+        configurator._profile_available_bytes(95.0) == 7 * 1024**3
+    )  # noqa: leading-underscore  # production name
 
 
 def test_non_colocated_ar_delegates_to_upstream_available_bytes(
     monkeypatch,
 ) -> None:
-    configurator = _configurator(total_gpu_memory_fraction=None)
+    configurator = make_configurator(total_gpu_memory_fraction=None)
 
-    def _fake_upstream_profile(self, pre_model_load_memory):
+    def fake_upstream_profile(self, pre_model_load_memory):
         assert pre_model_load_memory == 123
         return 456
 
     monkeypatch.setattr(
         KVCacheConfigurator,
         "_profile_available_bytes",
-        _fake_upstream_profile,
+        fake_upstream_profile,
     )
 
-    assert configurator._profile_available_bytes(123) == 456
+    assert (
+        configurator._profile_available_bytes(123) == 456
+    )  # noqa: leading-underscore  # production name
+
+
+HYBRID_STATE_BYTES_PER_REQUEST = 64 * 1024**2
+HYBRID_MAX_RUNNING_REQUESTS = 8
+
+
+@pytest.fixture
+def hybrid_schedule() -> Iterator[None]:
+    """Publish the schedule fields upstream's state-pool sizing reads and writes."""
+    published = get_context().override_server_args(
+        disable_radix_cache=True,
+        max_running_requests=HYBRID_MAX_RUNNING_REQUESTS,
+    )
+    published.install()
+    yield
+    published.restore()
+
+
+def make_hybrid_configurator(
+    *, total_gpu_memory_fraction: float | None
+) -> runner_mod.OmniKVCacheConfigurator:
+    """A configurator whose model keeps per-request linear-attention state."""
+    configurator = make_configurator(
+        total_gpu_memory_fraction=total_gpu_memory_fraction
+    )
+    hybrid_config = SimpleNamespace(
+        mamba2_cache_params=SimpleNamespace(
+            layers=[0, 1, 2],
+            mamba_cache_per_req=HYBRID_STATE_BYTES_PER_REQUEST,
+        )
+    )
+    configurator.mambaish_config = hybrid_config
+    configurator.hybrid_gdn_config = hybrid_config
+    configurator.pp_size = 1
+    configurator.attn_dp_size = 1
+    configurator.spec_algorithm = SimpleNamespace(is_none=lambda: True)
+    configurator.model_config = SimpleNamespace(hf_config=SimpleNamespace())
+    return configurator
+
+
+@pytest.mark.parametrize(
+    "process_memory_bytes,stage_budget_bytes",
+    [(30 * 1024**3, 10 * 1024**3), (None, 7 * 1024**3)],
+    ids=["nvml-process", "stage-load-delta"],
+)
+def test_colocated_hybrid_budget_sizes_state_pool_before_kv(
+    monkeypatch: pytest.MonkeyPatch,
+    hybrid_schedule: None,
+    process_memory_bytes: int | None,
+    stage_budget_bytes: int,
+) -> None:
+    """The stage budget must size the state pool the way upstream's profile does."""
+    configurator = make_hybrid_configurator(total_gpu_memory_fraction=0.4)
+    monkeypatch.setattr(
+        runner_mod, "get_process_gpu_memory_bytes", lambda gpu_id: process_memory_bytes
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "get_gpu_device_info",
+        lambda gpu_id: SimpleNamespace(total_memory_bytes=100 * 1024**3),
+    )
+    monkeypatch.setattr(
+        runner_mod.OmniKVCacheConfigurator,
+        "profile_available_bytes_from_stage_load_delta",
+        lambda self, pre_model_load_memory, total_memory: 7 * 1024**3,
+    )
+    assert get_schedule().max_mamba_cache_size is None
+
+    available_bytes = configurator._profile_available_bytes(
+        0
+    )  # noqa: leading-underscore  # production name
+
+    # One state slot per running request, plus the pool's padding slot.
+    assert get_schedule().max_mamba_cache_size == HYBRID_MAX_RUNNING_REQUESTS
+    assert available_bytes == (
+        stage_budget_bytes
+        - (HYBRID_MAX_RUNNING_REQUESTS + 1) * HYBRID_STATE_BYTES_PER_REQUEST
+    )
+
+
+def test_colocated_hybrid_budget_without_kv_headroom_raises(
+    monkeypatch: pytest.MonkeyPatch, hybrid_schedule: None
+) -> None:
+    configurator = make_hybrid_configurator(total_gpu_memory_fraction=0.4)
+    # A 512 MiB stage budget cannot hold nine 64 MiB state slots.
+    monkeypatch.setattr(
+        runner_mod,
+        "get_process_gpu_memory_bytes",
+        lambda gpu_id: 40 * 1024**3 - 512 * 1024**2,
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "get_gpu_device_info",
+        lambda gpu_id: SimpleNamespace(total_memory_bytes=100 * 1024**3),
+    )
+
+    with pytest.raises(RuntimeError, match="hybrid state cache"):
+        configurator._profile_available_bytes(
+            0
+        )  # noqa: leading-underscore  # production name
+
+
+def test_non_colocated_hybrid_budget_leaves_state_sizing_to_upstream(
+    monkeypatch: pytest.MonkeyPatch, hybrid_schedule: None
+) -> None:
+    """Upstream's profile already sizes the state pool; it must not shrink twice."""
+    configurator = make_hybrid_configurator(total_gpu_memory_fraction=None)
+    monkeypatch.setattr(
+        KVCacheConfigurator,
+        "_profile_available_bytes",
+        lambda self, pre_model_load_memory: 456,
+    )
+
+    assert (
+        configurator._profile_available_bytes(123) == 456
+    )  # noqa: leading-underscore  # production name
+    assert get_schedule().max_mamba_cache_size is None
 
 
 def test_qwen_ar_factory_derives_mem_fraction_from_total_budget() -> None:
@@ -349,7 +481,7 @@ def test_qwen_colocated_thinker_startup_threads_effective_budget(
     monkeypatch,
     caplog,
 ) -> None:
-    scheduler_calls = _patch_thinker_startup(monkeypatch)
+    scheduler_calls = patch_thinker_startup(monkeypatch)
 
     with caplog.at_level(logging.INFO, logger=qwen_stages.logger.name):
         qwen_stages.create_sglang_thinker_executor_from_config(
@@ -375,7 +507,7 @@ def test_qwen_colocated_thinker_explicit_mem_fraction_skips_default_reserve(
     monkeypatch,
     caplog,
 ) -> None:
-    scheduler_calls = _patch_thinker_startup(monkeypatch)
+    scheduler_calls = patch_thinker_startup(monkeypatch)
 
     with caplog.at_level(logging.INFO, logger=qwen_stages.logger.name):
         qwen_stages.create_sglang_thinker_executor_from_config(
@@ -412,9 +544,9 @@ def test_qwen_thinker_threads_explicit_generation_batch_policy(
     validation_calls: list[tuple[str, object]] = []
     validate_generation_batch_policy = qwen_stages.validate_generation_batch_policy
 
-    def _fake_server_args_builder(model_path, context_length, **overrides):
+    def fake_server_args_builder(model_path, context_length, **overrides):
         assert model_path == "dummy"
-        assert context_length == 8192
+        assert context_length is None
         build_calls.append(dict(overrides))
         return SimpleNamespace(
             mem_fraction_static=0.85,
@@ -433,7 +565,7 @@ def test_qwen_thinker_threads_explicit_generation_batch_policy(
             torch_compile_max_bs=overrides["torch_compile_max_bs"],
         )
 
-    def _validate_generation_batch_policy(*, model_name, server_args):
+    def fake_validate_generation_batch_policy(*, model_name, server_args):
         validation_calls.append((model_name, server_args))
         validate_generation_batch_policy(
             model_name=model_name,
@@ -443,17 +575,17 @@ def test_qwen_thinker_threads_explicit_generation_batch_policy(
     monkeypatch.setattr(
         qwen_stages,
         "build_sglang_server_args",
-        _fake_server_args_builder,
+        fake_server_args_builder,
     )
     monkeypatch.setattr(
         qwen_stages,
         "validate_generation_batch_policy",
-        _validate_generation_batch_policy,
+        fake_validate_generation_batch_policy,
     )
     monkeypatch.setattr(
         qwen_stages,
         "create_thinker_scheduler",
-        lambda server_args, *args, **kwargs: _publish_for(server_args),
+        lambda server_args, *args, **kwargs: publish_for(server_args),
     )
     monkeypatch.setattr(qwen_stages, "avail_gpu_mem", lambda gpu_id: 90.0)
     monkeypatch.setattr(
@@ -479,9 +611,9 @@ def test_qwen_talker_ar_threads_explicit_generation_batch_policy(monkeypatch) ->
     build_calls: list[dict[str, object]] = []
     scheduler_calls: list[dict[str, object]] = []
 
-    def _fake_server_args_builder(model_path, context_length, **overrides):
+    def fake_server_args_builder(model_path, context_length, **overrides):
         assert model_path == "dummy"
-        assert context_length == 4096
+        assert context_length is None
         build_calls.append(dict(overrides))
         return SimpleNamespace(
             mem_fraction_static=0.55,
@@ -501,7 +633,7 @@ def test_qwen_talker_ar_threads_explicit_generation_batch_policy(monkeypatch) ->
             torch_compile_max_bs=overrides["torch_compile_max_bs"],
         )
 
-    def _fake_create_talker_scheduler(server_args, gpu_id, **kwargs):
+    def fake_create_talker_scheduler(server_args, gpu_id, **kwargs):
         scheduler_calls.append(
             {
                 "gpu_id": gpu_id,
@@ -513,17 +645,17 @@ def test_qwen_talker_ar_threads_explicit_generation_batch_policy(monkeypatch) ->
                 "weight_prefix": kwargs["weight_prefix"],
             }
         )
-        return _publish_for(server_args)
+        return publish_for(server_args)
 
     monkeypatch.setattr(
         qwen_stages,
         "build_sglang_server_args",
-        _fake_server_args_builder,
+        fake_server_args_builder,
     )
     monkeypatch.setattr(
         qwen_bootstrap,
         "create_talker_scheduler",
-        _fake_create_talker_scheduler,
+        fake_create_talker_scheduler,
     )
     monkeypatch.setattr(qwen_stages, "avail_gpu_mem", lambda gpu_id: 90.0)
     monkeypatch.setattr(
@@ -534,16 +666,27 @@ def test_qwen_talker_ar_threads_explicit_generation_batch_policy(monkeypatch) ->
 
     qwen_stages.create_talker_ar_executor_from_config("dummy")
 
+    prefill_ladder = qwen_stages.build_default_prefill_cuda_graph_bs(
+        qwen_stages.TALKER_PREFILL_CUDA_GRAPH_MAX_TOKENS
+    )
+    if current_platform.is_cuda() and current_platform.enable_talker_graph():
+        prefill_backend = "breakable"
+    else:
+        prefill_backend = "disabled"
     assert build_calls == [
         {
             "cuda_graph_bs": [1, 2, 4, 8, 12, 16, 24, 32],
             "cuda_graph_max_bs": 32,
             "device": current_platform.device_type,
             "disable_cuda_graph": not current_platform.enable_talker_graph(),
+            "enable_torch_compile": False,
             "max_running_requests": 32,
             "sampling_backend": "pytorch",
             "torch_compile_max_bs": 32,
             "tp_size": 1,
+            "cuda_graph_backend_prefill": prefill_backend,
+            "cuda_graph_bs_prefill": prefill_ladder,
+            "cuda_graph_max_bs_prefill": max(prefill_ladder),
         }
     ]
     assert scheduler_calls == [
@@ -563,7 +706,7 @@ def test_talker_ar_default_running_batch_width_is_32(monkeypatch) -> None:
     """talker_ar default max_running_requests is 32; a config override still wins."""
     captured: list[dict[str, object]] = []
 
-    def _fake_builder(model_path, context_length, **overrides):
+    def fake_builder(model_path, context_length, **overrides):
         captured.append(dict(overrides))
         return SimpleNamespace(
             mem_fraction_static=overrides.get("mem_fraction_static"),
@@ -582,11 +725,11 @@ def test_talker_ar_default_running_batch_width_is_32(monkeypatch) -> None:
             torch_compile_max_bs=overrides["torch_compile_max_bs"],
         )
 
-    monkeypatch.setattr(qwen_stages, "build_sglang_server_args", _fake_builder)
+    monkeypatch.setattr(qwen_stages, "build_sglang_server_args", fake_builder)
     monkeypatch.setattr(
         qwen_bootstrap,
         "create_talker_scheduler",
-        lambda server_args, *a, **k: _publish_for(server_args),
+        lambda server_args, *a, **k: publish_for(server_args),
     )
     monkeypatch.setattr(qwen_stages, "avail_gpu_mem", lambda gpu_id: 90.0)
     monkeypatch.setattr(
@@ -602,16 +745,16 @@ def test_talker_ar_default_running_batch_width_is_32(monkeypatch) -> None:
     assert captured[-1]["max_running_requests"] == 8
 
 
-def _thinker_overrides(monkeypatch, *, allows: bool, **kwargs) -> dict[str, object]:
+def thinker_overrides(monkeypatch, *, allows: bool, **kwargs) -> dict[str, object]:
     captured: list[dict[str, object]] = []
-    _patch_thinker_startup(monkeypatch)
+    patch_thinker_startup(monkeypatch)
     inner = qwen_stages.build_sglang_server_args
 
-    def _recording_builder(model_path, context_length, **overrides):
+    def recording_builder(model_path, context_length, **overrides):
         captured.append(dict(overrides))
         return inner(model_path, context_length, **overrides)
 
-    monkeypatch.setattr(qwen_stages, "build_sglang_server_args", _recording_builder)
+    monkeypatch.setattr(qwen_stages, "build_sglang_server_args", recording_builder)
     monkeypatch.setattr(current_platform, "enable_thinker_decode_graph", lambda: allows)
     qwen_stages.create_sglang_thinker_executor_from_config(
         "dummy", total_gpu_memory_fraction=0.75, **kwargs
@@ -623,7 +766,7 @@ def _thinker_overrides(monkeypatch, *, allows: bool, **kwargs) -> dict[str, obje
 def test_thinker_decode_graph_follows_the_platform_gate(
     monkeypatch, allows: bool, expected: bool | None
 ) -> None:
-    overrides = _thinker_overrides(monkeypatch, allows=allows)
+    overrides = thinker_overrides(monkeypatch, allows=allows)
 
     assert overrides.get("disable_decode_cuda_graph") is expected
     # The gate reaches for the decode key only, never the global switch.
@@ -633,13 +776,25 @@ def test_thinker_decode_graph_follows_the_platform_gate(
 def test_thinker_decode_graph_stays_available_to_an_explicit_override(
     monkeypatch,
 ) -> None:
-    overrides = _thinker_overrides(
+    overrides = thinker_overrides(
         monkeypatch,
         allows=False,
         server_args_overrides={"disable_decode_cuda_graph": False},
     )
 
     assert overrides["disable_decode_cuda_graph"] is False
+
+
+@pytest.mark.parametrize(
+    "is_cuda, expected", [(True, "breakable"), (False, "disabled")]
+)
+def test_thinker_prefill_graph_defaults_to_breakable_on_cuda(
+    monkeypatch, is_cuda: bool, expected: str
+) -> None:
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: is_cuda)
+    overrides = thinker_overrides(monkeypatch, allows=True)
+
+    assert overrides["cuda_graph_backend_prefill"] == expected
 
 
 def test_importing_the_stages_module_does_not_load_the_platform_layer() -> None:
@@ -657,10 +812,10 @@ def test_importing_the_stages_module_does_not_load_the_platform_layer() -> None:
     assert result.stdout.strip().splitlines()[-1] == "ABSENT"
 
 
-def _talker_overrides(monkeypatch, *, allows: bool, **kwargs) -> dict[str, object]:
+def talker_overrides(monkeypatch, *, allows: bool, **kwargs) -> dict[str, object]:
     captured: list[dict[str, object]] = []
 
-    def _recording_builder(model_path, context_length, **overrides):
+    def recording_builder(model_path, context_length, **overrides):
         captured.append(dict(overrides))
         return SimpleNamespace(
             mem_fraction_static=overrides.get("mem_fraction_static"),
@@ -680,11 +835,11 @@ def _talker_overrides(monkeypatch, *, allows: bool, **kwargs) -> dict[str, objec
             enable_torch_compile=overrides.get("enable_torch_compile", False),
         )
 
-    monkeypatch.setattr(qwen_stages, "build_sglang_server_args", _recording_builder)
+    monkeypatch.setattr(qwen_stages, "build_sglang_server_args", recording_builder)
     monkeypatch.setattr(
         qwen_bootstrap,
         "create_talker_scheduler",
-        lambda server_args, *a, **k: _publish_for(server_args),
+        lambda server_args, *a, **k: publish_for(server_args),
     )
     monkeypatch.setattr(qwen_stages, "avail_gpu_mem", lambda gpu_id: 90.0)
     monkeypatch.setattr(
@@ -700,14 +855,14 @@ def _talker_overrides(monkeypatch, *, allows: bool, **kwargs) -> dict[str, objec
 def test_talker_decode_graph_follows_the_platform_gate(
     monkeypatch, allows: bool, expected: bool
 ) -> None:
-    overrides = _talker_overrides(monkeypatch, allows=allows)
+    overrides = talker_overrides(monkeypatch, allows=allows)
 
     assert overrides["disable_cuda_graph"] is expected
 
 
 def test_talker_graph_stays_available_to_an_explicit_override(monkeypatch) -> None:
     """The stage note promises engine.disable_cuda_graph wins."""
-    overrides = _talker_overrides(
+    overrides = talker_overrides(
         monkeypatch,
         allows=False,
         server_args_overrides={"disable_cuda_graph": False},

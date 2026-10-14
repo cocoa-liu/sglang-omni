@@ -15,6 +15,11 @@ import msgpack
 
 from sglang_omni.admission import QueueFullError
 from sglang_omni.pipeline.replicas import assign_replica_bindings
+from sglang_omni.profiler.duplex_events import (
+    emit_session_output_event,
+    emit_session_unit_event,
+    emit_session_unit_ready_event,
+)
 from sglang_omni.proto import OmniRequest, StreamMessage
 from sglang_omni.proto.session import (
     SESSION_METADATA_KEY,
@@ -31,6 +36,13 @@ class SessionStreamHandler(Protocol):
     def __call__(self, message: StreamMessage) -> None: ...
 
 
+@dataclass(frozen=True, kw_only=True)
+class PendingSessionChunk:
+    chunk: TimedChunk
+    encoded_bytes: int
+    request_id: str
+
+
 @dataclass(kw_only=True)
 class Session:
     session_identity: SessionIdentity
@@ -39,7 +51,7 @@ class Session:
     bindings: dict[str, int]
     limits: SessionLimits
     opened: list[str] = field(default_factory=list)
-    pending: deque[tuple[TimedChunk, int]] = field(default_factory=deque)
+    pending: deque[PendingSessionChunk] = field(default_factory=deque)
     pending_bytes: int = 0
     pending_count: int = 0
     outputs: deque[tuple[OutputChunk, int]] = field(default_factory=deque)
@@ -64,7 +76,7 @@ class CoordinatorSessions:
 
     def __init__(self) -> None:
         self.is_sessions_stopping = False
-        self.next_incarnation = 1
+        self.next_open_index = 1
         self.session_unavailable_stages: set[str] = set()
         self.sessions: dict[str, Session] = {}
         self.session_stream_handlers: dict[str, SessionStreamHandler] = {}
@@ -82,6 +94,8 @@ class CoordinatorSessions:
         self.session_cleanup_tasks.discard(task)
         if not task.cancelled():
             task.exception()
+        else:
+            pass
 
     def reject_session_metadata(self, request: object) -> None:
         if (
@@ -91,11 +105,15 @@ class CoordinatorSessions:
             raise ValueError(
                 f"request metadata key {SESSION_METADATA_KEY!r} is reserved"
             )
+        else:
+            pass
 
     def get_session(self, session_identity: SessionIdentity) -> Session:
-        session = self.sessions.get(session_identity.session_id)
+        session = self.sessions.get(session_identity.id)
         if session is None or session.session_identity != session_identity:
             raise ValueError("unknown or stale session reference")
+        else:
+            pass
         return session
 
     async def open_session(
@@ -109,47 +127,57 @@ class CoordinatorSessions:
         """Open a fixed linear route, upstream to downstream, before accepting input."""
         if (
             self.is_sessions_stopping
-            or not self._running
-            or self._fatal_error is not None
+            or not self.running
+            or self.fatal_error is not None
         ):
-            raise RuntimeError(self._fatal_error or "Coordinator is not running")
+            raise RuntimeError(self.fatal_error or "Coordinator is not running")
+        else:
+            pass
         if (
             not stages
             or stages[0] != self.entry_stage
             or len(set(stages)) != len(stages)
         ):
             raise ValueError("stages must be a unique route beginning at entry_stage")
+        else:
+            pass
         session_id = session_id or str(uuid.uuid4())
         if session_id in self.sessions:
             raise ValueError("session ID already reserved")
+        else:
+            pass
         bindings = (
             assign_replica_bindings(
-                self._logical_process_plan, self._binding_policy, session_id
+                self.logical_process_plan, self.binding_policy, session_id
             )
             or {}
         )
         owners = tuple(
             (
-                self._replica_topology.resolve(stage, bindings[stage])
-                if self._replica_topology.is_replicated(stage)
+                self.replica_topology.resolve(stage, bindings[stage])
+                if self.replica_topology.is_replicated(stage)
                 else stage
             )
             for stage in stages
         )
-        if any(owner not in self._stages for owner in owners):
+        if any(owner not in self.stages for owner in owners):
             raise ValueError("session route contains an unregistered owner")
+        else:
+            pass
         if self.session_unavailable_stages.intersection(owners):
             raise ValueError(
                 "session route contains an unregistered owner or unavailable owner"
             )
+        else:
+            pass
         session = Session(
-            session_identity=SessionIdentity(session_id, self.next_incarnation),
+            session_identity=SessionIdentity(session_id, self.next_open_index),
             request=request,
             stages=owners,
             bindings=bindings,
             limits=limits or SessionLimits(),
         )
-        self.next_incarnation += 1
+        self.next_open_index += 1
         self.sessions[session_id] = session
         try:
             async with session.lock:
@@ -162,6 +190,8 @@ class CoordinatorSessions:
                     or self.session_unavailable_stages.intersection(owners)
                 ):
                     raise RuntimeError("session owners are shutting down")
+                else:
+                    pass
         except BaseException:
             await asyncio.shield(
                 self.owned_session_task(self.close_session_state(session))
@@ -172,7 +202,12 @@ class CoordinatorSessions:
         return session.session_identity
 
     async def append_session(
-        self, session_identity: SessionIdentity, chunk: TimedChunk
+        self,
+        session_identity: SessionIdentity,
+        chunk: TimedChunk,
+        *,
+        ready_timestamp_ns: int | None = None,
+        ready_run_id: str | None = None,
     ) -> int:
         """Accept input in global seq order, independently of output consumption.
 
@@ -181,18 +216,28 @@ class CoordinatorSessions:
         session = self.get_session(session_identity)
         if session.is_closing or session.is_closed:
             raise RuntimeError("session is closing")
+        else:
+            pass
         if chunk.seq != session.next_input:
-            raise ValueError("input seq must be contiguous within an incarnation")
+            raise ValueError("input seq must be contiguous within an open index")
+        else:
+            pass
         if chunk.modality in session.ended_modalities:
             raise ValueError("input after EOS")
+        else:
+            pass
         if (
             not math.isfinite(chunk.t_start_ms)
             or not math.isfinite(chunk.duration_ms)
             or chunk.duration_ms < 0
         ):
             raise ValueError("input timing must be finite with a non-negative duration")
+        else:
+            pass
         if chunk.t_start_ms < session.modality_end_ms.get(chunk.modality, 0):
             raise ValueError("input timing overlaps or moves backwards")
+        else:
+            pass
         if isinstance(chunk.payload, bytes):
             encoded_bytes = wire_size(chunk.to_dict())
         else:
@@ -206,23 +251,51 @@ class CoordinatorSessions:
                 f"input chunk is {encoded_bytes} bytes; max_chunk_bytes is "
                 f"{limits.max_chunk_bytes}"
             )
+        else:
+            pass
         if (
             session.pending_count >= limits.max_pending_chunks
             or session.pending_bytes + encoded_bytes > limits.max_pending_bytes
         ):
             raise QueueFullError()
+        else:
+            pass
         if (
             chunk.modality not in session.modality_end_ms
             and len(session.modality_end_ms) >= limits.max_modalities
         ):
             raise QueueFullError()
-        session.pending.append((chunk, encoded_bytes))
+        else:
+            pass
+        request_id = f"session-{uuid.uuid4()}"
+        session.pending.append(
+            PendingSessionChunk(
+                chunk=chunk,
+                encoded_bytes=encoded_bytes,
+                request_id=request_id,
+            )
+        )
         session.pending_count += 1
         session.pending_bytes += encoded_bytes
         session.next_input += 1
         session.modality_end_ms[chunk.modality] = chunk.t_start_ms + chunk.duration_ms
         if chunk.eos:
             session.ended_modalities.add(chunk.modality)
+        else:
+            pass
+        emit_session_unit_ready_event(
+            request_id=request_id,
+            session_identity=session.session_identity,
+            input_chunk=chunk,
+            ready_timestamp_ns=ready_timestamp_ns,
+            ready_run_id=ready_run_id,
+        )
+        emit_session_unit_event(
+            request_id=request_id,
+            event_name="session_unit_admitted",
+            session_identity=session.session_identity,
+            input_chunk=chunk,
+        )
         session.wake.set()
         return chunk.seq
 
@@ -233,6 +306,8 @@ class CoordinatorSessions:
         session = self.get_session(session_identity)
         if session.is_reading:
             raise RuntimeError("session already has an output consumer")
+        else:
+            pass
         session.is_reading = True
         try:
             while True:
@@ -243,7 +318,11 @@ class CoordinatorSessions:
                 if session.is_closed:
                     if session.error is not None:
                         raise session.error
+                    else:
+                        pass
                     return
+                else:
+                    pass
                 session.output_wake.clear()
                 await session.output_wake.wait()
         finally:
@@ -255,6 +334,7 @@ class CoordinatorSessions:
     def emit_session_output(
         self,
         session: Session,
+        request_id: str,
         input_seq: int,
         chunk: TimedChunk,
         *,
@@ -262,6 +342,8 @@ class CoordinatorSessions:
     ) -> None:
         if session.is_closing:
             return
+        else:
+            pass
         output = OutputChunk(
             session_identity=session.session_identity,
             seq=session.next_output,
@@ -280,6 +362,17 @@ class CoordinatorSessions:
             or session.output_bytes + size > session.limits.max_output_bytes
         ):
             raise QueueFullError()
+        else:
+            pass
+        if kind == "data":
+            emit_session_output_event(request_id=request_id, output_chunk=output)
+        else:
+            emit_session_unit_event(
+                request_id=request_id,
+                event_name="session_unit_finished",
+                session_identity=session.session_identity,
+                input_chunk=chunk,
+            )
         session.outputs.append((output, size))
         session.output_bytes += size
         session.next_output += 1
@@ -294,18 +387,27 @@ class CoordinatorSessions:
                         session.wake.wait(), session.limits.idle_timeout_s
                     )
                     continue
-                chunk, size = session.pending.popleft()
+                else:
+                    pass
+                pending_chunk = session.pending.popleft()
+                chunk = pending_chunk.chunk
                 try:
-                    await self.session_operation(session, "append", chunk=chunk)
+                    await self.session_operation(
+                        session,
+                        "append",
+                        chunk=chunk,
+                        request_id=pending_chunk.request_id,
+                    )
                     self.emit_session_output(
                         session,
+                        pending_chunk.request_id,
                         chunk.seq,
                         replace(chunk, payload=None),
                         kind="input_done",
                     )
                 finally:
                     session.pending_count -= 1
-                    session.pending_bytes -= size
+                    session.pending_bytes -= pending_chunk.encoded_bytes
         except Exception as exc:
             session.error = exc
             self.owned_session_task(self.close_session_state(session))
@@ -317,6 +419,7 @@ class CoordinatorSessions:
         *,
         owner: str | None = None,
         chunk: TimedChunk | None = None,
+        request_id: str | None = None,
     ) -> None:
         session_identity = session.session_identity
         session_operation = SessionOperation(
@@ -332,7 +435,10 @@ class CoordinatorSessions:
                 SESSION_METADATA_KEY: session_operation.to_dict(),
             },
         )
-        request_id = f"session-{uuid.uuid4()}"
+        if request_id is None:
+            request_id = f"session-{uuid.uuid4()}"
+        else:
+            pass
 
         if chunk is not None:
             input_seq = chunk.seq
@@ -340,12 +446,17 @@ class CoordinatorSessions:
             def output(msg: StreamMessage) -> None:
                 try:
                     self.emit_session_output(
-                        session, input_seq, TimedChunk.from_dict(msg.chunk)
+                        session,
+                        request_id,
+                        input_seq,
+                        TimedChunk.from_dict(msg.chunk),
                     )
                 except Exception as exc:
                     self.reject_completion_future(request_id, exc)
 
             self.session_stream_handlers[request_id] = output
+        else:
+            pass
 
         async def run() -> None:
             await self.submit_request(
@@ -353,14 +464,14 @@ class CoordinatorSessions:
                 request,
                 target_stage=owner,
                 terminal_stages=(
-                    {self._replica_topology.logical_name(owner)}
+                    {self.replica_topology.logical_name(owner)}
                     if owner
-                    else {self._replica_topology.logical_name(session.stages[-1])}
+                    else {self.replica_topology.logical_name(session.stages[-1])}
                 ),
                 replica_bindings=session.bindings,
                 should_bypass_admission=operation == "close",
             )
-            await self._completion_futures[request_id]
+            await self.completion_futures[request_id]
 
         try:
             if operation == "close":
@@ -376,23 +487,29 @@ class CoordinatorSessions:
             raise
         finally:
             self.session_stream_handlers.pop(request_id, None)
-            if request_id in self._requests:
-                await self.abort(request_id)
-            future = self._completion_futures.pop(request_id, None)
-            if future is not None and not future.done():
-                future.cancel()
+            future = self.completion_futures.get(request_id)
+            if future is not None:
+                await self.release_submission(request_id, future)
+            else:
+                pass
 
     async def close_session(self, session_identity: SessionIdentity) -> None:
-        session = self.sessions.get(session_identity.session_id)
+        session = self.sessions.get(session_identity.id)
         if session is None:
             return
+        else:
+            pass
         if session.session_identity != session_identity:
             raise ValueError("stale session reference")
+        else:
+            pass
         await asyncio.shield(self.owned_session_task(self.close_session_state(session)))
         if session.cleanup_error is not None:
             raise RuntimeError(
                 "session cleanup incomplete; capacity remains reserved"
             ) from session.cleanup_error
+        else:
+            pass
 
     def begin_session_close(self, session: Session) -> None:
         session.is_closing = True
@@ -410,6 +527,8 @@ class CoordinatorSessions:
         async with session.lock:
             if session.is_closed:
                 return
+            else:
+                pass
             await self.cleanup_session(session)
 
     async def cleanup_session(self, session: Session) -> None:
@@ -427,6 +546,8 @@ class CoordinatorSessions:
                 session.is_closed = True
                 session.output_wake.set()
                 return
+        else:
+            pass
         session.pending.clear()
         session.pending_count = session.pending_bytes = 0
         unconfirmed = list(session.opened)
@@ -444,10 +565,12 @@ class CoordinatorSessions:
         session.output_wake.set()
         # Note (Junnan Li): An unacknowledged owner may still hold buffers; keep its capacity reserved.
         if session.cleanup_error is None:
-            del self.sessions[session.session_identity.session_id]
+            del self.sessions[session.session_identity.id]
+        else:
+            pass
 
     async def shutdown_stage_sessions(self, selected: set[str] | None) -> None:
-        affected = set(self._stages) if selected is None else selected
+        affected = set(self.stages) if selected is None else selected
         self.session_unavailable_stages.update(affected)
         if selected is None:
             await self.stop_sessions()
