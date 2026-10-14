@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Qwen3-ASR NPU serving and transcript regressions using local audio fixtures."""
+"""Qwen3-ASR NPU serving regressions using cached official audio samples."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import tempfile
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
@@ -12,6 +14,8 @@ from pathlib import Path
 
 import pytest
 import requests
+
+AUDIO_DOWNLOAD_TIMEOUT_SECONDS = 60
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("OMNI_RUN_NPU_TESTS") != "1",
@@ -25,16 +29,31 @@ def normalize(text: str) -> str:
     )
 
 
-def load_cases(path: Path) -> dict:
+def load_cases(path: Path, cache_dir: Path) -> dict[str, dict[str, str | float]]:
     cases = json.loads(path.read_text())
     assert set(cases) == {"English", "Chinese"}, "Provide both language fixtures"
+    cache_dir.mkdir(parents=True, exist_ok=True)
     for case in cases.values():
         assert normalize(case["text"]), "A reference transcript is required"
-        # No permissive default: calibrate the ceiling against fixed audio.
         assert isinstance(case["max_cer"], (int, float))
         assert 0 <= case["max_cer"] < 1, "Set a calibrated CER ceiling below 1"
-        audio = (path.parent / case["audio"]).resolve()
-        assert audio.is_file(), f"Missing fixture: {audio}"
+        audio = (cache_dir / case["audio"]).resolve()
+        cached = audio.is_file()
+        if cached:
+            audio_bytes = audio.read_bytes()
+        else:
+            with requests.get(
+                case["url"], timeout=AUDIO_DOWNLOAD_TIMEOUT_SECONDS
+            ) as response:
+                response.raise_for_status()
+                audio_bytes = response.content
+        assert (
+            hashlib.sha256(audio_bytes).hexdigest() == case["sha256"]
+        ), f"Audio checksum mismatch: {audio}"
+        if not cached:
+            audio.write_bytes(audio_bytes)
+        else:
+            pass
         case["audio"] = str(audio)
     return cases
 
@@ -83,7 +102,10 @@ def asr_server(tmp_path_factory):
     config = Path(os.environ["OMNI_NPU_ASR_CONFIG"]).resolve()
     assert (model / "config.json").is_file()
     assert config.is_file()
-    cases = load_cases(Path(os.environ["OMNI_NPU_ASR_CASES"]))
+    cases = load_cases(
+        Path(os.environ["OMNI_NPU_ASR_CASES"]),
+        Path(tempfile.gettempdir()) / "sglang-omni-npu-asr",
+    )
     output = Path(
         os.environ.get("OMNI_NPU_ASR_OUTPUT", str(tmp_path_factory.mktemp("npu-asr")))
     )
