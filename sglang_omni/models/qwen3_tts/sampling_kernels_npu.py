@@ -17,12 +17,12 @@ def mix32(value: tl.tensor, key: tl.tensor) -> tl.tensor:
     return (value * 5 + 0xE6546B64).to(tl.uint32)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["width"])
 def hash32_kernel(
     seeds: tl.tensor,
     positions: tl.tensor,
     output: tl.tensor,
-    width: tl.constexpr,
+    width: int,
     block: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
