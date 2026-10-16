@@ -48,10 +48,7 @@ from sglang_omni.scheduling.streaming_vocoder import (
 )
 from sglang_omni.utils.audio_payload import audio_waveform_payload
 from sglang_omni.utils.cuda_staging import GrowablePinnedBuffer, PinnedTransferSlot
-from sglang_omni.utils.device import (
-    supports_device_streams,
-    supports_device_streams_with_npu,
-)
+from sglang_omni.utils.device import has_device_streams, supports_device_streams
 from sglang_omni.utils.snake_beta import fuse_vocoder_decoder
 
 if TYPE_CHECKING:
@@ -733,10 +730,10 @@ class Qwen3TTSStreamingVocoderScheduler(
         parameter = next(parameters(), None) if callable(parameters) else None
         codec_state_dtype = parameter.dtype if parameter is not None else torch.float32
         if (
-            supports_device_streams_with_npu(self.device)
+            has_device_streams(self.device)
             and self.device.index is None
             and (parameter is not None)
-            and supports_device_streams_with_npu(parameter.device)
+            and has_device_streams(parameter.device)
         ):
             self.device = parameter.device
         else:
@@ -829,7 +826,7 @@ class Qwen3TTSStreamingVocoderScheduler(
             False
             if self.enable_stateful_codec_decoder and self.deterministic_inference
             else (
-                supports_device_streams_with_npu(self.device)
+                has_device_streams(self.device)
                 if async_decode is None
                 else bool(async_decode)
             )
@@ -871,9 +868,9 @@ class Qwen3TTSStreamingVocoderScheduler(
         self.codec_slots_in_flight: set[int] = set()
         self.codec_slots_deferred: set[int] = set()
         self.decode_staging = threading.local()
-        self.pinned_staging_disabled = not supports_device_streams_with_npu(self.device)
+        self.pinned_staging_disabled = not has_device_streams(self.device)
         self.cuda_decode_failed = False
-        if supports_device_streams_with_npu(self.device):
+        if has_device_streams(self.device):
             followup_priority = (
                 0
                 if self.device.type == "npu"
@@ -1390,7 +1387,7 @@ class Qwen3TTSStreamingVocoderScheduler(
         state.code_chunks.append(codes)
         codes_ready = state.pending_codes_ready
         state.pending_codes_ready = None
-        if codes_ready is None and supports_device_streams_with_npu(codes.device):
+        if codes_ready is None and has_device_streams(codes.device):
             codes_ready = torch.get_device_module(codes.device).Event()
             codes_ready.record()
         else:

@@ -181,7 +181,7 @@ def stub_device_runtime(
     )
     monkeypatch.setattr(
         incremental_codec_cuda_graph,
-        "supports_device_streams_with_npu",
+        "has_device_streams",
         lambda device: True,
     )
     monkeypatch.setattr(
