@@ -16,7 +16,7 @@ import contextlib
 
 import torch
 
-from sglang_omni.utils.device import device_guard, supports_device_streams
+from sglang_omni.utils.device import device_guard, supports_device_streams_with_npu
 
 
 def allocate_pinned(numel: int, dtype: torch.dtype) -> torch.Tensor:
@@ -39,9 +39,7 @@ def new_device_event(device: torch.device, *, blocking: bool = False) -> torch.E
 
 def normalize_device(device: torch.device | str | int) -> torch.device:
     resolved = torch.device(device)
-    if (
-        supports_device_streams(resolved) or resolved.type == "npu"
-    ) and resolved.index is None:
+    if supports_device_streams_with_npu(resolved) and resolved.index is None:
         return torch.device(
             resolved.type, torch.get_device_module(resolved).current_device()
         )

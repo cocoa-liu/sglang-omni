@@ -25,7 +25,7 @@ from sglang_omni.platforms.device_graph import (
     DeviceGraphPool,
     ReplayableGraph,
 )
-from sglang_omni.utils.device import device_guard, supports_device_streams
+from sglang_omni.utils.device import device_guard, supports_device_streams_with_npu
 from sglang_omni.utils.gpu_memory import format_bytes_gib
 
 logger = logging.getLogger(__name__)
@@ -183,7 +183,7 @@ class Qwen3TTSIncrementalCodecCudaGraphRunner:
         )
         self.configured = bool(
             enabled
-            and (supports_device_streams(self.device) or self.device.type == "npu")
+            and supports_device_streams_with_npu(self.device)
             and (self.graph_backend is not None)
             and (self.device.index is not None)
             and (self.num_quantizers > 0)

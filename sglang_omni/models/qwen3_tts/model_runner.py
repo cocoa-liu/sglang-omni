@@ -20,7 +20,7 @@ from sglang_omni.scheduling.types import (
     SchedulerOutput,
     SchedulerRequest,
 )
-from sglang_omni.utils.device import supports_device_streams
+from sglang_omni.utils.device import supports_device_streams_with_npu
 
 if TYPE_CHECKING:
     from sglang.srt.layers.logits_processor import LogitsProcessorOutput
@@ -96,7 +96,7 @@ class Qwen3TTSModelRunner(ModelRunner):
         self.silence_codec_ids = silence_codec_ids
         self.codes_event_module = (
             torch.get_device_module(self.device)
-            if (supports_device_streams(self.device) or self.device.type == "npu")
+            if supports_device_streams_with_npu(self.device)
             else None
         )
 

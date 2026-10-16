@@ -19,9 +19,14 @@ def supports_device_streams(device: torch.device) -> bool:
     return device.type in {"cuda", "musa", "xpu"}
 
 
+def supports_device_streams_with_npu(device: torch.device) -> bool:
+    """Include NPU for stream paths that opt in to Ascend support."""
+    return supports_device_streams(device) or device.type == "npu"
+
+
 def device_guard(device: torch.device) -> AbstractContextManager[None]:
     """Pin the calling thread to device, or do nothing off an accelerator."""
-    if supports_device_streams(device) or device.type == "npu":
+    if supports_device_streams_with_npu(device):
         return torch.get_device_module(device).device(device)
     else:
         return nullcontext()
@@ -99,4 +104,5 @@ __all__ = [
     "resolve_concrete_device",
     "resolve_device_spec",
     "supports_device_streams",
+    "supports_device_streams_with_npu",
 ]
