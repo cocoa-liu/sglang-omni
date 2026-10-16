@@ -739,6 +739,11 @@ class Qwen3TTSStreamingVocoderScheduler(
         else:
             pass
         self.device_module = torch.get_device_module(self.device)
+        self.decode_stream_priority: int = (
+            vocoder_decode_stream_priority(self.device_module)
+            if supports_device_streams(self.device)
+            else 0
+        )
         if fused_snake_activation:
             replaced = fuse_vocoder_decoder(self.decoder)
             logger.info(f"Qwen3-TTS vocoder fused SnakeBeta modules: {replaced}")
@@ -871,19 +876,14 @@ class Qwen3TTSStreamingVocoderScheduler(
         self.pinned_staging_disabled = not has_device_streams(self.device)
         self.cuda_decode_failed = False
         if has_device_streams(self.device):
-            followup_priority = (
-                0
-                if self.device.type == "npu"
-                else vocoder_decode_stream_priority(self.device_module)
-            )
             self.decode_stream = self.device_module.Stream(
-                device=self.device, priority=followup_priority
+                device=self.device, priority=self.decode_stream_priority
             )
             self.followup_decode_streams = (
                 tuple(
                     (
                         self.device_module.Stream(
-                            device=self.device, priority=followup_priority
+                            device=self.device, priority=self.decode_stream_priority
                         )
                         for _ in range(worker_count)
                     )
@@ -988,17 +988,14 @@ class Qwen3TTSStreamingVocoderScheduler(
         graph_enabled = bool(
             enabled and self.async_decode and (not self.deterministic_inference)
         )
-        graph_priority = (
-            vocoder_decode_stream_priority(self.device_module)
-            if supports_device_streams(self.device)
-            else 0
-        )
         graph_batch_sizes = self.resolve_incremental_warm_graph_batch_sizes(
             max_batch_size=min(self.followup_max_batch_size, codec_state_slots)
         )
         # note (ratish): the initial worker replays its cold, window and tail graphs one at a
         # time on its stream and copies each output out before the next, so they share a pool.
-        initial_graph_pool = IncrementalCodecGraphPool(stream_priority=graph_priority)
+        initial_graph_pool = IncrementalCodecGraphPool(
+            stream_priority=self.decode_stream_priority
+        )
         cold_widths = tuple(sorted({int(frames) for frames in cold_frames}))
         initial = Qwen3TTSIncrementalCodecCudaGraphRunner(
             self.incremental_decoder,
@@ -1085,7 +1082,7 @@ class Qwen3TTSStreamingVocoderScheduler(
                     ),
                     arena=self.codec_arena,
                     graph_pool=IncrementalCodecGraphPool(
-                        stream_priority=graph_priority
+                        stream_priority=self.decode_stream_priority
                     ),
                 )
                 for _ in range(worker_count)
