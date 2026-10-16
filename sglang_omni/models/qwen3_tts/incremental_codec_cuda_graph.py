@@ -342,14 +342,13 @@ class Qwen3TTSIncrementalCodecCudaGraphRunner:
                 pass
             capture_stream.wait_stream(current_stream)
             try:
-                # note (cocoa): NPU capture caches tensors updated outside inference mode.
                 with (
+                    torch.inference_mode(),
                     self.graph_backend.capture(
                         pool=pool,
                         stream=capture_stream,
                         thread_local_errors=True,
                     ) as graph,
-                    torch.inference_mode(),
                 ):
                     resources.keepalives.append(graph)
                     state = self.arena.gather_by_index(static_index)
