@@ -357,7 +357,9 @@ def create_vocoder_executor(
     else:
         pass
     if incremental_codec_compile is None:
-        incremental_codec_compile = enable_stateful_codec_decoder
+        incremental_codec_compile = (
+            enable_stateful_codec_decoder and torch.device(device).type != "npu"
+        )
     else:
         pass
     tokenizer = load_qwen3_tts_tokenizer(
