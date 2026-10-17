@@ -15,7 +15,12 @@ from typing import Literal, Protocol, TypedDict
 
 import torch
 from torch.cuda import _POOL_HANDLE as CudaGraphPoolHandle
-from torch.xpu import _POOL_HANDLE as XpuGraphPoolHandle
+
+try:
+    from torch.xpu import _POOL_HANDLE as XpuGraphPoolHandle
+except ImportError:
+    # note (cocoa): NPU stacks on PyTorch 2.10 do not expose XPU graph types.
+    XpuGraphPoolHandle = tuple[int, int]
 
 
 class CudaCaptureKwargs(TypedDict, total=False):

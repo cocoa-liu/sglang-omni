@@ -566,18 +566,17 @@ def test_qwen3_tts_engine_probes_silence_ids_only_for_base(
 
 
 @pytest.mark.parametrize(
-    ("filename", "model_suffix", "mem_fraction_static", "disable_cuda_graph"),
+    ("filename", "model_suffix", "mem_fraction_static"),
     [
-        ("qwen3_tts_1_7b_npu.yaml", "1.7B-Base", 0.60, False),
-        ("qwen3_tts_0_6b_customvoice_npu.yaml", "0.6B-CustomVoice", 0.70, True),
-        ("qwen3_tts_1_7b_voicedesign_npu.yaml", "1.7B-VoiceDesign", 0.60, True),
+        ("qwen3_tts_1_7b_npu.yaml", "1.7B-Base", 0.60),
+        ("qwen3_tts_0_6b_customvoice_npu.yaml", "0.6B-CustomVoice", 0.70),
+        ("qwen3_tts_1_7b_voicedesign_npu.yaml", "1.7B-VoiceDesign", 0.60),
     ],
 )
-def test_qwen3_tts_npu_configs_use_sdpa_with_selected_graph_mode(
+def test_qwen3_tts_npu_configs_use_sdpa_with_graphs(
     filename: str,
     model_suffix: str,
     mem_fraction_static: float,
-    disable_cuda_graph: bool,
 ) -> None:
     config_path = Path(__file__).parents[3] / "examples" / "configs" / filename
     config = ConfigManager.from_file(str(config_path)).config
@@ -589,7 +588,7 @@ def test_qwen3_tts_npu_configs_use_sdpa_with_selected_graph_mode(
     assert stages["tts_engine"].tp_size == 1
     assert stages["tts_engine"].factory.attn_implementation == "sdpa"
     assert stages["tts_engine"].engine.attention_backend == "ascend"
-    assert stages["tts_engine"].engine.disable_cuda_graph is disable_cuda_graph
+    assert stages["tts_engine"].engine.disable_cuda_graph is False
     assert stages["tts_engine"].engine.enable_torch_compile is False
     assert stages["tts_engine"].engine.max_running_requests == 1
     assert stages["tts_engine"].engine.max_queued_requests == 8
@@ -599,14 +598,14 @@ def test_qwen3_tts_npu_configs_use_sdpa_with_selected_graph_mode(
         assert stages["vocoder"].factory.stream_chunk_ramp == [1, 2, 2, 2, 4, 4]
 
 
-def test_qwen3_tts_0_6b_base_npu_config_uses_eager_concurrency() -> None:
+def test_qwen3_tts_0_6b_base_npu_config_uses_graph_concurrency() -> None:
     config_path = Path(__file__).parents[3] / "examples/configs/qwen3_tts_0_6b_npu.yaml"
     config = ConfigManager.from_file(str(config_path)).config
     stages = {stage.name: stage for stage in config.stages}
     engine = stages["tts_engine"].engine
     vocoder = stages["vocoder"].factory
 
-    assert engine.disable_cuda_graph is True
+    assert engine.disable_cuda_graph is False
     assert engine.max_running_requests == 16
     assert engine.max_queued_requests == 16
     assert vocoder.max_batch_size == 8
@@ -2434,7 +2433,11 @@ def test_qwen3_tts_vocoder_factory_forwards_incremental_graph_config(
 
 
 def vocoder_factory_capture(
-    monkeypatch: pytest.MonkeyPatch, *, tts_model_type: str = "base", **factory_kwargs
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    tts_model_type: str = "base",
+    device: str = "cpu",
+    **factory_kwargs,
 ) -> dict[str, object]:
     """Build the vocoder stage against a stand-in scheduler and return its kwargs."""
     captured: dict[str, object] = {}
@@ -2461,8 +2464,54 @@ def vocoder_factory_capture(
         "load_qwen3_tts_checkpoint_config",
         lambda model_path: {"tts_model_type": tts_model_type},
     )
-    qwen3_stages.create_vocoder_executor("model", device="cpu", **factory_kwargs)
+    qwen3_stages.create_vocoder_executor("model", device=device, **factory_kwargs)
     return captured
+
+
+@pytest.mark.parametrize(
+    ("device", "async_decode", "codec_graph", "deterministic", "internal_format"),
+    [
+        ("npu", True, True, False, False),
+        ("npu", None, True, False, False),
+        ("npu", False, True, False, True),
+        ("npu", True, False, False, True),
+        ("npu", True, True, True, True),
+        ("cuda", True, True, False, True),
+        ("cpu", True, True, False, True),
+    ],
+)
+def test_vocoder_factory_selects_capture_compatible_npu_convolutions(
+    monkeypatch: pytest.MonkeyPatch,
+    device: str,
+    async_decode: bool | None,
+    codec_graph: bool,
+    deterministic: bool,
+    internal_format: bool,
+) -> None:
+    configuration = SimpleNamespace(allow_internal_format=True)
+    monkeypatch.setattr(
+        qwen3_stages,
+        "torch",
+        SimpleNamespace(
+            device=lambda value: SimpleNamespace(type=value.partition(":")[0]),
+            npu=SimpleNamespace(config=configuration),
+        ),
+    )
+    monkeypatch.setattr(
+        qwen3_stages, "resolve_concrete_device", lambda value, gpu_id: value
+    )
+
+    captured = vocoder_factory_capture(
+        monkeypatch,
+        device=device,
+        async_decode=async_decode,
+        incremental_codec_cuda_graph=codec_graph,
+        enable_deterministic_inference=deterministic,
+    )
+
+    assert configuration.allow_internal_format is internal_format
+    assert captured["async_decode"] is async_decode
+    assert captured["incremental_codec_cuda_graph"] is codec_graph
 
 
 def test_qwen3_tts_config_starts_a_declining_platform_decoding_synchronously(

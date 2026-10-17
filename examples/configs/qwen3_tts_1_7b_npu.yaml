@@ -30,4 +30,6 @@ stages:
       max_batch_size: 1
       initial_max_batch_size: 1
       followup_max_batch_size: 1
+      async_decode: true
+      incremental_codec_cuda_graph: true
       stream_chunk_ramp: [1, 2, 2, 2, 4, 4]
