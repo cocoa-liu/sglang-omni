@@ -81,19 +81,14 @@ sgl-omni serve \
 
 ### Ascend NPU baseline
 
-The NPU configurations use SGLang's `ascend` attention backend for the Talker
-and PyTorch SDPA for both Speech Tokenizer instances. Asynchronous vocoder
-decode and its codec graph warmup are opt-in on NPU. All four NPU examples
-explicitly enable `async_decode` and `incremental_codec_cuda_graph`, alongside
-Talker graphs. This graph configuration is experimental: validate graph capture
-and replay with the target SGLang and Ascend runtime before deployment.
-The Talker and vocoder graph switches are independent.
-Enabling incremental codec graphs on NPU disables internal tensor formats in
-the vocoder's worker process so convolutions use the graph-compatible ACLNN
-implementation. Colocated stages share this process setting.
-Private Talker compile stays disabled in all four examples. The 0.6B Base
-configuration has been validated with 16 concurrent requests; the other
-configurations retain a conservative single-request baseline.
+All four NPU examples enable Talker graphs, asynchronous vocoder decoding, and
+incremental codec graphs. Custom NPU configurations use synchronous decoding
+by default.
+
+Graph capture and replay have been validated on Ascend 910 with SGLang 0.5.21,
+PyTorch 2.10.0, and torch_npu 2.10.0. The 0.6B Base configuration has been
+validated with 16 concurrent requests; the other examples keep
+`max_running_requests: 1`.
 
 ```bash
 # 0.6B Base
@@ -105,6 +100,18 @@ sgl-omni serve \
 
 Use `qwen3_tts_1_7b_npu.yaml`, `qwen3_tts_0_6b_customvoice_npu.yaml`, or
 `qwen3_tts_1_7b_voicedesign_npu.yaml` for the other supported checkpoints.
+
+Use these `sgl-omni serve` options to enable or disable each feature:
+
+| Feature | Option | Enable (NPU examples) | Disable |
+|---|---|---|---|
+| Talker engine graphs | `--tts_engine.engine.disable_cuda_graph` | `false` | `true` |
+| Asynchronous vocoder decoding | `--vocoder.factory.async_decode` | `true` | `false` |
+| Incremental codec graphs | `--vocoder.factory.incremental_codec_cuda_graph` | `true` | `false` |
+
+Incremental codec graphs require asynchronous decoding, so enable both vocoder
+options when using a custom configuration.
+
 The 0.6B and 1.7B files intentionally have separate `mem_fraction_static`
 starting values. Calibrate configurations that retain the single-request
 baseline on the target NPU before increasing `max_running_requests` or any
@@ -523,9 +530,9 @@ each: the default path holds 0.6% to 2.3% of streams underrun against 20.9%
 for the left-context decoder, with first playable audio at 55 to 58 ms
 against 82 to 89 ms.
 
-Intel XPU, Ascend NPU, CPU and Apple MPS decode synchronously by default at the
-platform level. The four NPU examples above explicitly enable asynchronous
-decode and codec graphs. To opt in on Intel GPUs, follow the
+Intel XPU, CPU and Apple MPS decode synchronously by default. For NPU defaults
+and configuration, see [Ascend NPU baseline](#ascend-npu-baseline).
+To opt in on Intel GPUs, follow the
 [Qwen3-TTS XPU recipe](../get_started/installation_xpu.md#qwen3-tts-text-to-speech-single-xpu).
 
 Each follow-up batch sorts the stateful decoder's cohorts, and the rows within
@@ -686,6 +693,9 @@ TTFA measures arrival of the first PCM payload, not the first audible speech; it
 
 ## Known Limitations
 
+- **NPU stages sharing a process.** Enabling asynchronous incremental codec graphs
+  disables internal tensor formats for the entire vocoder process, including
+  colocated Talker and preprocessing stages.
 - **Reference audio recommended.** As a cloning model, Qwen3-TTS Base produces robotic speech
   without a reference clip.
 - **Transcript improves cloning.** Providing `text` in `references` (ICL mode) yields better
