@@ -101,16 +101,9 @@ sgl-omni serve \
 Use `qwen3_tts_1_7b_npu.yaml`, `qwen3_tts_0_6b_customvoice_npu.yaml`, or
 `qwen3_tts_1_7b_voicedesign_npu.yaml` for the other supported checkpoints.
 
-Use these `sgl-omni serve` options to enable or disable each feature:
-
-| Feature | Option | Enable (NPU examples) | Disable |
-|---|---|---|---|
-| Talker engine graphs | `--tts_engine.engine.disable_cuda_graph` | `false` | `true` |
-| Asynchronous vocoder decoding | `--vocoder.factory.async_decode` | `true` | `false` |
-| Incremental codec graphs | `--vocoder.factory.incremental_codec_cuda_graph` | `true` | `false` |
-
-Incremental codec graphs require asynchronous decoding, so enable both vocoder
-options when using a custom configuration.
+To disable graph capture, pass `--tts_engine.engine.disable_cuda_graph true`
+for the Talker and `--vocoder.factory.incremental_codec_cuda_graph false` for
+the vocoder. Use `--vocoder.factory.async_decode false` for synchronous decoding.
 
 The 0.6B and 1.7B files intentionally have separate `mem_fraction_static`
 starting values. Calibrate configurations that retain the single-request
@@ -693,9 +686,8 @@ TTFA measures arrival of the first PCM payload, not the first audible speech; it
 
 ## Known Limitations
 
-- **NPU stages sharing a process.** Enabling asynchronous incremental codec graphs
-  disables internal tensor formats for the entire vocoder process, including
-  colocated Talker and preprocessing stages.
+- **NPU process sharing.** Asynchronous incremental codec graphs disable internal
+  tensor formats for all stages sharing the vocoder process.
 - **Reference audio recommended.** As a cloning model, Qwen3-TTS Base produces robotic speech
   without a reference clip.
 - **Transcript improves cloning.** Providing `text` in `references` (ICL mode) yields better
