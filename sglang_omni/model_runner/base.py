@@ -33,7 +33,6 @@ from sglang_omni.scheduling.types import (
 )
 
 if TYPE_CHECKING:
-    from sglang.srt.hardware_backend.mlx.tp_worker import MlxTpModelWorker
     from sglang.srt.layers.logits_processor import LogitsProcessorOutput
     from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
     from sglang.srt.managers.scheduler import GenerationBatchResult
@@ -154,7 +153,7 @@ class ModelRunner(Generic[RequestDataInput]):
 
     def __init__(
         self,
-        tp_worker: ModelWorker | MlxTpModelWorker,
+        tp_worker: ModelWorker,
         output_processor: SGLangOutputProcessor,
     ) -> None:
         self.tp_worker = tp_worker
@@ -1043,7 +1042,7 @@ class ModelRunner(Generic[RequestDataInput]):
     ) -> None:
         """Install per-row ``seed``s onto ``sampling_info`` so SGLang routes to
         ``multinomial_with_seed``. No-op when no request set a seed, or when a
-        subclass already installed its own (e.g. Qwen3-TTS).
+        subclass already installed its own.
 
         Runs once per decode step. User-provided seeds are resolved once and
         cached back onto ``sampling_params.sampling_seed``. In a mixed
@@ -1084,20 +1083,6 @@ class ModelRunner(Generic[RequestDataInput]):
             raise ValueError(
                 "SGLang seeded sampling does not support min_p yet; set min_p=0 "
                 "or omit request seed"
-            )
-        else:
-            pass
-        need_top_p_sampling = sampling_info.need_top_p_sampling
-        need_top_k_sampling = sampling_info.need_top_k_sampling
-        if not (need_top_p_sampling or need_top_k_sampling):
-            return
-        else:
-            pass
-        if current_sglang_sampling_backend() == "flashinfer":
-            raise ValueError(
-                "SGLang flashinfer sampling backend does not support request seed "
-                "with top_p/top_k filtering; configure sampling_backend='pytorch' "
-                "or avoid top_p/top_k with seed"
             )
         else:
             pass

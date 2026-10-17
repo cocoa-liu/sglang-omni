@@ -25,7 +25,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass
 from itertools import islice
-from typing import TYPE_CHECKING, Callable, Generic
+from typing import Callable, Generic
 
 import torch
 from sglang.srt.configs.model_config import ModelConfig
@@ -58,9 +58,12 @@ from sglang.srt.session.session_controller import SessionController
 from sglang.srt.utils import DynamicGradMode, broadcast_pyobj
 from typing_extensions import TypedDict
 
-from sglang_omni.admission import ContextExhaustedError, QueueFullError
+from sglang_omni.admission import (
+    AdminDroppedRequestError,
+    ContextExhaustedError,
+    QueueFullError,
+)
 from sglang_omni.model_runner.base import ModelRunner, PendingStep
-from sglang_omni.model_runner.mlx_model_worker import MlxSchedulerPendingStep
 from sglang_omni.model_runner.model_worker import ModelWorker
 from sglang_omni.model_runner.weight_checker import WeightCheckResult
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
@@ -108,12 +111,6 @@ from sglang_omni.scheduling.types import (
     StreamOutputBuilder,
 )
 
-if TYPE_CHECKING:
-    from sglang.srt.hardware_backend.mlx.tp_worker import MlxTpModelWorker
-
-else:
-    pass
-
 logger = logging.getLogger(__name__)
 
 
@@ -151,7 +148,7 @@ class PendingDecode:
 
     batch: ScheduleBatch
     scheduler_output: SchedulerOutput
-    device_step: PendingStep | MlxSchedulerPendingStep
+    device_step: PendingStep
 
 
 class PendingStreamIngress:
@@ -254,7 +251,7 @@ _REQUEST_BUILD_ADMISSION_WAIT_S = 0.002
 
 
 class OmniSchedulerArguments(TypedDict, Generic[RequestDataT], total=False):
-    tp_worker: ModelWorker | MlxTpModelWorker
+    tp_worker: ModelWorker
     tree_cache: BasePrefixCache
     req_to_token_pool: ReqToTokenPool
     token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator
@@ -309,7 +306,7 @@ class OmniScheduler(Generic[RequestDataT]):
 
     def __init__(
         self,
-        tp_worker: ModelWorker | MlxTpModelWorker,
+        tp_worker: ModelWorker,
         tree_cache: BasePrefixCache,
         req_to_token_pool: ReqToTokenPool,
         token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
@@ -934,7 +931,7 @@ class OmniScheduler(Generic[RequestDataT]):
             pass
         return attr
 
-    def init_parallel_state(self, tp_worker: ModelWorker | MlxTpModelWorker) -> None:
+    def init_parallel_state(self, tp_worker: ModelWorker) -> None:
         from sglang.srt.runtime_context import get_parallel
 
         enable_dp_attention = get_parallel().enable_dp_attention
@@ -2850,10 +2847,8 @@ class OmniScheduler(Generic[RequestDataT]):
             self.last_pause_mode = mode
             self.resolve_pending_async()
             num_paused = 0
-            aborted_request_ids: list[str] = []
             if mode == "abort":
-                aborted_request_ids = self.abort_all_requests()
-                num_paused = len(aborted_request_ids)
+                num_paused = len(self.abort_all_requests())
             elif mode == "retract":
                 num_paused = self.retract_running_requests()
             else:
@@ -2864,7 +2859,6 @@ class OmniScheduler(Generic[RequestDataT]):
             "data": {
                 "mode": mode,
                 "num_paused_requests": num_paused,
-                "aborted_request_ids": aborted_request_ids,
                 "engine_paused": self._engine_paused,  # noqa: leading-underscore
             },
         }
@@ -3079,6 +3073,10 @@ class OmniScheduler(Generic[RequestDataT]):
         request_ids = self.active_request_ids()
         for request_id in request_ids:
             self.abort(request_id, defer_running_cleanup=False)
+            # note (Richard Wang): nobody else knows this stage dropped the
+            # request, so end it through its own output path, which reaches the
+            # coordinator however the admin call itself turns out.
+            self.emit_request_error(request_id, AdminDroppedRequestError())
         seen: set[int] = set()
         for batch in (self.running_batch, self.cur_batch, self.last_batch):
             if batch is None or id(batch) in seen:
@@ -3119,6 +3117,9 @@ class OmniScheduler(Generic[RequestDataT]):
                     request_ids.add(rid)
                 else:
                     pass
+        # note (Richard Wang): a request whose build waits for upstream chunks
+        # is owned here too, so abort all and the active request check see it.
+        request_ids.update(list(self.deferred_request_payloads))
         for batch in (
             self.running_batch,
             self.cur_batch,

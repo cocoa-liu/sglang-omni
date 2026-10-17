@@ -60,29 +60,9 @@ source .venv-apple/bin/activate
 export DYLD_LIBRARY_PATH="$(brew --prefix ffmpeg@7)/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 ```
 
-Keep the official checkpoint as `--model-path`; it supplies the ONNX
-preprocessing assets. The MLX path additionally needs the converted speech
-model artifact, which contains the Qwen2, Flow, and HiFT weights. `mlx-audio`
-is not a runtime dependency.
-
-### MLX
+The model runs through PyTorch MPS with the official checkpoint:
 
 ```bash
-SGLANG_USE_MLX=1 sgl-omni serve \
-  --model-path FunAudioLLM/Fun-CosyVoice3-0.5B-2512 \
-  --tts-engine.factory.mlx_model_path \
-    mlx-community/Fun-CosyVoice3-0.5B-2512-4bit \
-  --tts-engine.engine.quantization mlx_q4 \
-  --port 8000
-```
-
-### Torch/MPS
-
-Without `SGLANG_USE_MLX=1`, the same model runs through PyTorch MPS and does
-not need a converted MLX artifact:
-
-```bash
-unset SGLANG_USE_MLX
 sgl-omni serve \
   --model-path FunAudioLLM/Fun-CosyVoice3-0.5B-2512 \
   --port 8000
@@ -236,7 +216,7 @@ curl -X POST http://localhost:8000/v1/audio/speech \
 | `temperature` | `0.7` | Sampling temperature |
 | `top_p` | `0.8` | Top-p sampling |
 | `top_k` | `20` | Top-k sampling |
-| `repetition_penalty` | `1.1` | Repetition penalty |
+| `repetition_penalty` | `1.21` | Repetition penalty |
 | `max_new_tokens` | `min(2048, 20x target text tokens)` | Maximum number of generated speech tokens. If omitted, derived from the target text length (capped at 2048); stop tokens are also suppressed until at least `2x` that length has been generated |
 | `seed` | `null` | Random seed for reproducibility |
 | `stream` | `false` | Incremental causal Flow + HiFT; first PCM chunk after `28 + prompt_pad` speech tokens (`prompt_pad` rounds the prompt length to a multiple of 25) |
@@ -344,7 +324,7 @@ curl -X POST http://localhost:8000/v1/audio/speech \
   --output output.wav
 ```
 
-#### Python
+**Python**
 
 ```python
 import requests

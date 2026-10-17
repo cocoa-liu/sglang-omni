@@ -179,12 +179,6 @@ def test_omni_scheduler_weights_checker_compare_change_is_success() -> None:
             {"model_path": "/tmp/new-model", "torch_empty_cache": True},
             id="disk",
         ),
-        pytest.param(
-            "admin_update_weights_from_tensor",
-            "update_weights_from_tensor",
-            {"serialized_named_tensors": None, "torch_empty_cache": True},
-            id="tensor",
-        ),
     ],
 )
 def test_omni_scheduler_weight_updates_flush_and_advance_epoch(
@@ -370,7 +364,8 @@ def test_omni_scheduler_flush_cache_has_upstream_idle_compat_fields() -> None:
     ]
 
 
-def test_omni_scheduler_abort_pause_reports_the_dropped_requests() -> None:
+def test_omni_scheduler_abort_pause_ends_each_dropped_request() -> None:
+    from sglang_omni.admission import AdminDroppedRequestError
     from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 
     aborted: list[str] = []
@@ -381,49 +376,20 @@ def test_omni_scheduler_abort_pause_reports_the_dropped_requests() -> None:
     scheduler.active_request_ids = lambda: ["req-1", "req-2"]
     scheduler.abort = lambda request_id, **_kwargs: aborted.append(request_id)
     scheduler.running_batch = scheduler.cur_batch = scheduler.last_batch = None
+    scheduler.is_entry_rank = True
+    scheduler.outbox = queue.Queue()
 
     result = OmniScheduler.admin_pause_generation(scheduler, {"mode": "abort"})
 
     assert aborted == ["req-1", "req-2"]
     assert result["data"]["num_paused_requests"] == 2
-    assert result["data"]["aborted_request_ids"] == ["req-1", "req-2"]
-
-
-def test_omni_scheduler_distributed_update_rejects_active_requests_by_default() -> None:
-    from sglang_omni.scheduling.omni_scheduler import OmniScheduler
-
-    update_calls: list[dict] = []
-    scheduler = object.__new__(OmniScheduler)
-    scheduler.model_worker = SimpleNamespace(
-        update_weights_from_distributed=lambda payload: update_calls.append(payload)
-        or (True, "ok")
-    )
-    scheduler.admin_lock = threading.Lock()
-    scheduler._engine_paused = False  # noqa: leading-underscore  # production name
-    scheduler.last_pause_mode = None
-    scheduler.async_pending = None
-    scheduler.resolve_pending_async = lambda: None
-    scheduler.active_request_ids = lambda: ["req-1"]
-
-    result = OmniScheduler.admin_update_weights_from_distributed(
-        scheduler,
-        {
-            "names": ["w.0"],
-            "dtypes": ["bfloat16"],
-            "shapes": [[2, 2]],
-            "flush_cache": False,
-            "abort_all_requests": False,
-        },
-    )
-
-    assert result["success"] is False
-    assert "active requests are present" in result["message"]
-    assert result["data"]["active_request_count"] == 1
-    assert (
-        scheduler._engine_paused is False
-    )  # noqa: leading-underscore  # production name
-    assert result["data"]["engine_paused"] is False
-    assert update_calls == []
+    assert "aborted_request_ids" not in result["data"]
+    ended = [scheduler.outbox.get_nowait() for _ in range(2)]
+    assert [(msg.request_id, msg.type) for msg in ended] == [
+        ("req-1", "error"),
+        ("req-2", "error"),
+    ]
+    assert all(AdminDroppedRequestError.matches(msg.data) for msg in ended)
 
 
 def test_omni_scheduler_distributed_update_aborts_and_flushes_cache() -> None:

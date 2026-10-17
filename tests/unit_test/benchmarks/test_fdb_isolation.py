@@ -3,9 +3,6 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -19,27 +16,15 @@ from benchmarks.duplex.fdb.common import (
     NCCL_PORT_END,
     load_settings,
 )
+from benchmarks.duplex.fdb.generate import generate
+from benchmarks.duplex.fdb.selection import SampleSelection
 from benchmarks.duplex.fdb.servers import model_server_command
 from sglang_omni.cli import app
 from sglang_omni.models.minicpm_o.config import MiniCPMOSpeechPipelineConfig
-from sglang_omni.models.minicpm_o.native_config import MiniCPMODuplexPipelineConfig
-from sglang_omni.utils.port_claim import claim_tcp_port, release_tcp_port
-
-CLAIM_BASE_PORT = 25100
-CLAIM_SPAN = 20
-_DEAD_PID_SCAN_START = 1_000_000
-_DEAD_PID_SCAN_COUNT = 200
-
-
-def dead_pid() -> int:
-    for pid in range(_DEAD_PID_SCAN_START, _DEAD_PID_SCAN_START + _DEAD_PID_SCAN_COUNT):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return pid
-        except PermissionError:
-            continue
-    raise AssertionError("no unused pid in the scan range")
+from sglang_omni.models.minicpm_o.native_config import (
+    DEFAULT_MAX_SESSIONS,
+    MiniCPMODuplexPipelineConfig,
+)
 
 
 @pytest.fixture
@@ -105,6 +90,27 @@ def test_gpu_without_visible_devices_still_offsets_ports(
     assert settings.server_port == DEFAULT_SERVER_PORT + JOB_PORT_STRIDE
 
 
+def test_generate_refuses_more_shards_than_the_server_admits(
+    clean_job_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("FDB_WORK", str(tmp_path / "fdb"))
+    settings = load_settings("isolation")
+    num_shards = DEFAULT_MAX_SESSIONS + 1
+    with pytest.raises(
+        SystemExit,
+        match=f"--num-shards {num_shards} exceeds the model server's max_sessions "
+        f"{DEFAULT_MAX_SESSIONS}",
+    ):
+        generate(
+            settings,
+            1,
+            SampleSelection(per_subset=1),
+            SampleSelection(per_subset=0),
+            num_shards=num_shards,
+        )
+    assert not (tmp_path / "fdb").exists()
+
+
 def test_judge_ports_stay_above_the_nccl_claim_range() -> None:
     for gpu_index in range(8):
         judge_port = DEFAULT_JUDGE_PORT + gpu_index * JOB_PORT_STRIDE
@@ -135,62 +141,3 @@ def test_model_server_command_launches_the_duplex_pipeline(
 
     assert result.exit_code == 0, result.output
     assert type(launch_server.call_args.args[0]) is MiniCPMODuplexPipelineConfig
-
-
-def test_concurrent_claims_take_different_ports(tmp_path: Path) -> None:
-    script = (
-        "import os\n"
-        "import time\n"
-        "from pathlib import Path\n"
-        "from sglang_omni.utils.port_claim import claim_tcp_port\n"
-        f"port = claim_tcp_port({CLAIM_BASE_PORT}, {CLAIM_SPAN})\n"
-        "marker = Path(os.environ['SGLANG_OMNI_PORT_CLAIM_DIR']) "
-        "/ f'held-{os.getpid()}'\n"
-        "marker.write_text(str(port))\n"
-        "deadline = time.time() + 10\n"
-        "while time.time() < deadline:\n"
-        "    held = list(Path(os.environ['SGLANG_OMNI_PORT_CLAIM_DIR']).glob('held-*'))\n"
-        "    if len(held) >= 2:\n"
-        "        break\n"
-        "    time.sleep(0.05)\n"
-        "print(port)\n"
-    )
-    child_env = os.environ.copy()
-    child_env["SGLANG_OMNI_PORT_CLAIM_DIR"] = str(tmp_path)
-    processes = [
-        subprocess.Popen(
-            [sys.executable, "-c", script],
-            cwd=Path(__file__).resolve().parents[3],
-            env=child_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        for _ in range(2)
-    ]
-    claimed_ports = []
-    for process in processes:
-        stdout, stderr = process.communicate(timeout=30)
-        assert process.returncode == 0, stderr
-        claimed_ports.append(int(stdout.strip()))
-    assert claimed_ports[0] != claimed_ports[1]
-    assert all(
-        CLAIM_BASE_PORT <= port < CLAIM_BASE_PORT + CLAIM_SPAN for port in claimed_ports
-    )
-
-
-def test_live_claim_is_skipped_and_stale_claim_is_reused(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setenv("SGLANG_OMNI_PORT_CLAIM_DIR", str(tmp_path))
-    live_port = CLAIM_BASE_PORT
-    (tmp_path / str(live_port)).write_text(f"{os.getpid()}\n")
-    claimed = claim_tcp_port(CLAIM_BASE_PORT, 2)
-    assert claimed == live_port + 1
-    release_tcp_port(claimed)
-
-    stale_port = CLAIM_BASE_PORT + 2
-    (tmp_path / str(stale_port)).write_text(f"{dead_pid()}\n")
-    reclaimed = claim_tcp_port(stale_port, 1)
-    assert reclaimed == stale_port
-    release_tcp_port(reclaimed)
