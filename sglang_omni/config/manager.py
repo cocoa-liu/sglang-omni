@@ -1,6 +1,5 @@
 import os
 from collections.abc import Iterable, Mapping
-from typing import Any
 
 from transformers import AutoConfig
 
@@ -8,7 +7,7 @@ from sglang_omni.config.patch import ConfigPatchSet
 from sglang_omni.config.resolver import ConfigResolver
 from sglang_omni.config.schema import PipelineConfig
 from sglang_omni.config.sources import patches_from_dotted_cli, sources_from_config_file
-from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
+from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY, resolve_variant
 from sglang_omni.utils import (
     architecture_from_hf_config,
     try_resolve_arch_from_auk_layout,
@@ -119,7 +118,7 @@ class ConfigManager:
 
     def merge_config(
         self,
-        extra_args: Mapping[str, Any] | Iterable[tuple[str, Any]],
+        extra_args: Mapping[str, object] | Iterable[tuple[str, object]],
         *,
         extra_patches: ConfigPatchSet | None = None,
     ) -> PipelineConfig:
@@ -157,10 +156,11 @@ class ConfigManager:
             module = importlib.import_module(config_cls.__module__)
             variants = getattr(module, "Variants", None)
             if variants and variant in variants:
-                config_cls = variants[variant]
+                config_cls = resolve_variant(variants[variant])
             else:
                 raise ValueError(
-                    f"Unknown variant '{variant}' for {config_cls.__name__}"
+                    f"Unknown variant '{variant}' for {config_cls.__name__}. "
+                    f"Available variants: {', '.join(sorted(variants or ())) or 'none'}"
                 )
         else:
             pass

@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+import base64
+from typing import ClassVar
 
 from pydantic import Field
 
@@ -12,9 +13,13 @@ from sglang_omni.config import (
     FactoryArgs,
     PipelineConfig,
     PlacementConfig,
+    ProcessConfig,
     StageConfig,
 )
 from sglang_omni.platforms import current_platform
+from sglang_omni.serve.protocol import ChatCompletionRequest, ChatMessage
+from sglang_omni.serve.server_warmup import WARMUP_MAX_TOKENS, warmup_tone_wav_bytes
+from sglang_omni.utils.cpu import effective_cpu_count
 
 _PKG = "sglang_omni.models.qwen3_omni"
 _PLACEMENT_POLICY = f"{_PKG}.placement.Qwen3OmniPlacementPolicy"
@@ -23,11 +28,13 @@ THINKER_STAGE = "thinker"
 # TALKER_START_MIN_CHUNKS reflects the prompt topology's one-chunk minimum.
 MIN_PARTIAL_START_CHUNKS = 3
 
-# Note (wenyao): vLLM-Omni qwen3_omni.py::_get_talker_assistant_parts needs one chunk
+# Note (wenyao): the talker assistant prompt needs one chunk
 # for a 9-row tail (3 template + 4 pad + BOS + text); later chunks feed decode.
 TALKER_START_MIN_CHUNKS = 1
 
 ENABLE_TALKER_START_TOPOLOGY = False
+
+TALKER_MAX_RUNNING_REQUESTS = 32
 
 # SGLang reads this when DeepGEMM compile utilities are imported. Qwen AR
 # stages can first hit some dense FP8 shapes after readiness; disable all-M
@@ -60,7 +67,7 @@ def preprocessing_stage(*, process: str, speech_enabled: bool = False) -> StageC
         name="preprocessing",
         process=process,
         factory_path=f"{_PKG}.stages.create_preprocessing_executor",
-        factory=FactoryArgs(max_seq_len=8192),
+        factory=FactoryArgs(),
         next=next_stages,
         route_fn=route_fn,
         project_payload={
@@ -143,11 +150,9 @@ def aggregate_stage(*, process: str, gpu: int) -> StageConfig:
 def thinker_stage(*, gpu: int, speech_enabled: bool, process: str) -> StageConfig:
     # note (jiaxin deng): async decode defaults on;
     # --thinker.factory.enable_async_decode false overrides it.
-    factory_group = FactoryArgs(max_seq_len=8192, enable_async_decode=True)
+    factory_group = FactoryArgs(enable_async_decode=True)
     if speech_enabled:
-        factory_group = FactoryArgs(
-            max_seq_len=8192, enable_async_decode=True, speech_enabled=True
-        )
+        factory_group = FactoryArgs(enable_async_decode=True, speech_enabled=True)
     else:
         pass
     join_kwargs: dict = {}
@@ -197,17 +202,13 @@ def decode_stage(*, process: str) -> StageConfig:
 
 
 def talker_stage_env() -> dict[str, str]:
-    # Note (jeffro): FlashInfer CUTLASS fused finalize uses BF16 atomic-add;
-    # accumulation order is not fixed and can flip Talker codec tokens.
-    env = {"SGLANG_FLASHINFER_MOE_FUSED_FINALIZE": "0"}
     if current_platform.is_rocm():
         # Note (zijiecode): aiter.greedy_sample returns wrong ids for vocab sizes below
         # 16384 (gfx950, aiter c16d44b9) and the Talker codec head has 3072, so a
         # greedy Talker request would corrupt its first codec token.
-        env["SGLANG_DISABLE_AITER_GREEDY_SAMPLE"] = "1"
+        return {"SGLANG_DISABLE_AITER_GREEDY_SAMPLE": "1"}
     else:
-        pass
-    return env
+        return {}
 
 
 def talker_stage(
@@ -224,15 +225,7 @@ def talker_stage(
         wait_for_fn=f"{_PKG}.request_builders.resolve_mm_aggregate_wait_sources",
         merge_fn=f"{_PKG}.request_builders.merge_for_talker",
         factory_path=f"{_PKG}.stages.create_talker_ar_executor_from_config",
-        # Note (Xuesong): max_seq_len must exceed talker_max_new_tokens (4096)
-        # + prefill, else req_to_token_pool OOBs and crashes talker_ar.
-        # Note (Chenyang): bumped 8192 → 32768 because the V1 talker
-        # prefill replays the full thinker prompt as projected
-        # embeddings, and a 30-frame video prompt is ~22K positions,
-        # which overflows 8192 and triggers a FusedAddRMSNorm illegal
-        # memory access in the talker forward.
         factory=FactoryArgs(
-            max_seq_len=32768,
             enable_partial_start=enable_partial_start,
             partial_start_min_chunks=5,
             # Note (wenyao): Match the default serial Code2Wav window so later
@@ -326,9 +319,60 @@ SPEECH_DEFAULT_PROCESSES = {
 # of waiting for its own turn.
 COLOCATED_SPEECH_PROCESSES = {**SPEECH_DEFAULT_PROCESSES, "code2wav": "talker_ar"}
 
+WARMUP_IMAGE_PNG_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAACXBIWXMAAA7EAAAOxAGVKw4bAAAA"
+    "bUlEQVRYhe3VsQ2AMAxE0Y/lIgNQULD/OqyCMgCihCKSG4yRuKuiNH6JLsoEbMACOGBcua9HOR7Y"
+    "6w6swBwMy0qLTpkeI77qdEBpBFAHBBDAGH8WrwJKI4AAegUCfAKgEgpQDvh3CR3oQCuav58qlAw7"
+    "3kKCSgAAAABJRU5ErkJggg=="
+)
+
+
+def build_server_warmup_request(
+    pipeline_config: PipelineConfig,
+) -> ChatCompletionRequest:
+    """An image, a second of audio and a short instruction through every stage."""
+    if pipeline_config.code2wav_stage() is None:
+        modalities = ["text"]
+        talker_max_new_tokens = None
+    else:
+        modalities = ["text", "audio"]
+        talker_max_new_tokens = WARMUP_MAX_TOKENS
+    return ChatCompletionRequest(
+        messages=[
+            ChatMessage(
+                role="user",
+                content=[
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{WARMUP_IMAGE_PNG_BASE64}"
+                        },
+                    },
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": base64.b64encode(warmup_tone_wav_bytes()).decode(
+                                "ascii"
+                            ),
+                            "format": "wav",
+                        },
+                    },
+                    {"type": "text", "text": "Describe the image and the audio."},
+                ],
+            )
+        ],
+        modalities=modalities,
+        max_tokens=WARMUP_MAX_TOKENS,
+        talker_max_new_tokens=talker_max_new_tokens,
+        temperature=0.0,
+    )
+
 
 class Qwen3OmniBasePipelineConfig(PipelineConfig):
     architecture: ClassVar[str] = "Qwen3OmniMoeForConditionalGeneration"
+    server_warmup_request_factory: ClassVar[str] = (
+        f"{_PKG}.config.build_server_warmup_request"
+    )
     tensor_parallel_disable_custom_all_reduce_stages: ClassVar[tuple[str, ...]] = (
         THINKER_STAGE,
     )
@@ -339,11 +383,20 @@ class Qwen3OmniBasePipelineConfig(PipelineConfig):
         default_factory=lambda: dict(_DEEPGEMM_PRECOMPILE_ENV_DEFAULTS)
     )
 
+    def resolved_stage_env_defaults(self, stage_name: str) -> dict[str, str]:
+        """Keep CPU-sensitive preprocessing parallel unless OMP is configured."""
+        env_defaults = super().resolved_stage_env_defaults(stage_name)
+        if stage_name == "preprocessing" and "OMP_NUM_THREADS" not in env_defaults:
+            env_defaults["OMP_NUM_THREADS"] = str(effective_cpu_count())
+        else:
+            pass
+        return env_defaults
+
     @classmethod
     def topology_gated_custom_all_reduce_stages(cls) -> set[str]:
         return {THINKER_STAGE}
 
-    def stage_factory_kwargs(self, stage_name: str) -> dict[str, Any]:
+    def stage_factory_kwargs(self, stage_name: str) -> dict[str, bool]:
         speech_enabled = any(stage.name == "talker_ar" for stage in self.stages)
         if stage_name in ("image_encoder", "audio_encoder"):
             # Device selection is deferred to the worker; the encoders read
@@ -400,7 +453,7 @@ class Qwen3OmniSpeechPipelineConfig(Qwen3OmniBasePipelineConfig):
         )
     )
 
-    def stage_factory_kwargs(self, stage_name: str) -> dict[str, Any]:
+    def stage_factory_kwargs(self, stage_name: str) -> dict[str, bool | int]:
         process_by_stage = {stage.name: stage.process for stage in self.stages}
         code2wav_shares_talker_process = (
             process_by_stage["code2wav"] == process_by_stage["talker_ar"]
@@ -410,17 +463,39 @@ class Qwen3OmniSpeechPipelineConfig(Qwen3OmniBasePipelineConfig):
                 "speech_enabled": True,
                 "feedback_enabled": True,
                 "code2wav_in_process": code2wav_shares_talker_process,
+                "max_running_requests": TALKER_MAX_RUNNING_REQUESTS,
             }
         else:
             pass
         if stage_name == "code2wav":
+            talker = self.stage_named("talker_ar")
+            talker_process = self.processes.get(talker.process, ProcessConfig())
             return {
                 "enable_cuda_graph": current_platform.enable_code2wav_graph(),
                 "talker_in_process": code2wav_shares_talker_process,
+                "codec_state_slots": self.talker_max_running_requests()
+                * talker_process.num_replicas,
             }
         else:
             pass
         return super().stage_factory_kwargs(stage_name)
+
+    def talker_max_running_requests(self) -> int:
+        """The talker's running-request cap as its factory resolves it: an engine override, then
+        a factory override, then this pipeline's default."""
+        talker = self.stage_named("talker_ar")
+        engine_overrides = (
+            talker.engine.overrides() if talker.engine is not None else {}
+        )
+        factory_overrides = talker.factory.model_extra or {}
+        return int(
+            engine_overrides.get(
+                "max_running_requests",
+                factory_overrides.get(
+                    "max_running_requests", TALKER_MAX_RUNNING_REQUESTS
+                ),
+            )
+        )
 
 
 class Qwen3OmniSpeechColocatedPipelineConfig(Qwen3OmniSpeechPipelineConfig):

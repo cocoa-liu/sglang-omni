@@ -5,13 +5,15 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
 
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
-from transformers import AutoConfig
+from transformers import AutoConfig, PretrainedConfig
+
+from sglang_omni.utils.json import JsonValue
 
 try:
     from transformers.initialization import no_init_weights
@@ -42,7 +44,7 @@ _PERSONAPLEX_ARCHITECTURE = "PersonaPlexForCausalLM"
 _PERSONAPLEX_LAYOUT_MARKER = "tokenizer_spm_32k_3.model"
 
 
-def architecture_from_hf_config(hf_config: Any) -> str | None:
+def architecture_from_hf_config(hf_config: PretrainedConfig) -> str | None:
     """Prefer HF architectures; fall back to architecture/model_type."""
     archs = getattr(hf_config, "architectures", None)
     if archs:
@@ -64,6 +66,28 @@ def architecture_from_hf_config(hf_config: Any) -> str | None:
     else:
         pass
     return None
+
+
+MROPE_ONLY_KEYS = frozenset({"interleaved", "mrope_interleaved", "mrope_section"})
+
+
+def drop_mrope_keys(
+    rope_parameters: Mapping[str, JsonValue],
+) -> dict[str, JsonValue]:
+    """The rope parameters without the keys only MRoPE reads."""
+    return {
+        key: value
+        for key, value in rope_parameters.items()
+        if key not in MROPE_ONLY_KEYS
+    }
+
+
+def use_text_rope(config: PretrainedConfig) -> None:
+    """Drop the MRoPE-only rope keys so the runtime builds text RoPE."""
+    if config.rope_parameters is None:
+        pass
+    else:
+        config.rope_parameters = drop_mrope_keys(config.rope_parameters)
 
 
 def load_mistral_params_json(
@@ -316,7 +340,7 @@ def load_hf_config(
     *,
     trust_remote_code: bool = True,
     local_files_only: bool = True,
-) -> Any:
+) -> PretrainedConfig:
     """Load the HF config, preferring the local cache."""
     try:
         config_path = cached_file(
@@ -334,7 +358,9 @@ def load_hf_config(
     return cfg
 
 
-def instantiate_module(module_cls: type[nn.Module], config: Any) -> nn.Module:
+def instantiate_module(
+    module_cls: type[nn.Module], config: PretrainedConfig
+) -> nn.Module:
     """Instantiate a module without allocating its parameters."""
     with no_init_weights():
         if hasattr(module_cls, "_from_config"):
