@@ -520,7 +520,10 @@ process, and that times the engine replicas when the vocoder runs in its own
 process, since requests bind to its replicas round-robin. Raise
 `--vocoder.factory.codec_state_slots` together with `max_running_requests`.
 
-Intel XPU, CPU and Apple MPS decode synchronously by default. For NPU defaults and configuration, see [Ascend NPU baseline](#ascend-npu-baseline). To opt in on Intel GPUs, follow the [Qwen3-TTS XPU recipe](../get_started/installation_xpu.md#qwen3-tts-text-to-speech-single-xpu).
+Intel XPU, CPU and Apple MPS decode synchronously by default. For NPU defaults
+and configuration, see [Ascend NPU baseline](#ascend-npu-baseline).
+To opt in on Intel GPUs, follow the
+[Qwen3-TTS XPU recipe](../get_started/installation_xpu.md#qwen3-tts-text-to-speech-single-xpu).
 
 Each follow-up batch sorts the stateful decoder's cohorts, and the rows within
 each, by playback deadline: the nearest cohort launches first and its nearest
