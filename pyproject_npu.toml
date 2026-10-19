@@ -131,7 +131,7 @@ override-dependencies = [
 
 # Shared by the installer and image builds. This metadata does not install SGLang.
 [tool.sglang-omni.npu]
-sglang-version = "0.5.20"
+sglang-version = "0.5.21"
 base-image-a3 = "lmsysorg/sglang:v0.5.20-cann9.0.0-a3@sha256:0756b534a0379863c435ec8b7896ba17a18fccda2c8889326fb1dc9453de9be4"
 base-image-910b = "lmsysorg/sglang:v0.5.20-cann9.0.0-910b@sha256:ee030245e37859d4534f226791919c6c28761a3b4c16c79eb780f9673b92ac8a"
 
