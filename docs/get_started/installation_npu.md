@@ -22,6 +22,8 @@ selected by [`pyproject_npu.toml`](../../pyproject_npu.toml), and common audio
 dependencies. Model weights, host drivers and TorchCodec are not included.
 Model support on NPU and optional dependencies must be checked separately.
 
+The SGLang 0.5.22 images target A3 and 950 (A5). A2 / 910B requires an older image release or a separately maintained compatible stack.
+
 ### A3 image installation
 
 Use an ARM64 Linux host with Docker and Ascend A3 devices.
@@ -30,17 +32,15 @@ Use an ARM64 Linux host with Docker and Ascend A3 devices.
 
 Pull the image matching your hardware from Huawei Cloud SWR:
 
-- **Release:** use `v<version>-cann9.0.0-a3` for deployments, replacing
-  `v<version>` with a published version tag.
-- **Development:** use `main-cann9.0.0-a3` for the latest published development
-  build. Scheduled or manual publications update this rolling tag.
+- **Release:** use `v<version>-cann9.1.0-a3` for deployments, replacing `v<version>` with a published version tag.
+- **Development:** use `main-cann9.1.0-a3` for the latest published development build. Scheduled or manual publications update this rolling tag.
 
 ```bash
 # Release (replace v<version> with a published version):
-# IMAGE=swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni:v<version>-cann9.0.0-a3
+# IMAGE=swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni:v<version>-cann9.1.0-a3
 
 # Development (A3):
-IMAGE=swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni:main-cann9.0.0-a3
+IMAGE=swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni:main-cann9.1.0-a3
 
 docker pull "$IMAGE"
 ```
@@ -84,21 +84,20 @@ When selecting another device, update both `/dev/davinci0` and
 relative to the visible devices (`gpu: 0` selects the first visible device).
 
 <details>
-<summary>A2 image installation details (click)</summary>
+<summary>950 (A5) image installation details (click)</summary>
 
-Use an ARM64 Linux host with Docker and Ascend A2 / 910B devices.
+Use an ARM64 Linux host with Docker and Ascend 950 (A5) devices.
 
 **1. Pull the image**
 
-Use `v<version>-cann9.0.0-910b` for a release, or
-`main-cann9.0.0-910b` for the latest published development build.
+Use `v<version>-cann9.1.0-950` for a release, or `main-cann9.1.0-950` for the latest published development build.
 
 ```bash
 # Release (replace v<version> with a published version):
-# IMAGE=swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni:v<version>-cann9.0.0-910b
+# IMAGE=swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni:v<version>-cann9.1.0-950
 
-# Development (A2 / 910B):
-IMAGE=swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni:main-cann9.0.0-910b
+# Development (950 / A5):
+IMAGE=swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni:main-cann9.1.0-950
 
 docker pull "$IMAGE"
 ```
@@ -163,8 +162,7 @@ The Ascend software stack and SGLang must already be installed.
 
 ### Prerequisites
 
-Select mutually compatible versions for your Ascend hardware by following the
-linked documentation. Python 3.11 is the verified configuration.
+Select mutually compatible versions for your Ascend hardware by following the linked documentation. The base images use Python 3.12; manual installations require Python 3.11 or 3.12.
 
 | Component | Version | Required | Manual installation | Installation |
 |-----------|---------|----------|---------------------|--------------|
