@@ -40,6 +40,7 @@ from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.threaded_simple_scheduler import ThreadedSimpleScheduler
 from sglang_omni.utils.checkpoint import resolve_checkpoint as _resolve_checkpoint
 from sglang_omni.utils.device import resolve_concrete_device
+from sglang_omni.utils.hf import use_text_rope
 from sglang_omni.utils.json import JsonValue
 
 if TYPE_CHECKING:
@@ -158,11 +159,11 @@ def register_qwen3_tts_hf_config() -> None:
 
         def _patched_init(self, *args, **kwargs):
             original_init(self, *args, **kwargs)
-            talker_config = getattr(self, "talker_config", None)
-            if talker_config is not None:
-                self.text_config = talker_config
-            else:
-                pass
+            # note (ratish): the talker's three MRoPE position rows are identical, so it
+            # rotates as text RoPE; dropping the MRoPE keys before the runtime reads the
+            # text config means no MRoPE positions are built or copied for it.
+            use_text_rope(self.talker_config)
+            self.text_config = self.talker_config
 
         Qwen3TTSConfig.__init__ = _patched_init
         Qwen3TTSConfig._sglang_omni_patched = True  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
@@ -347,6 +348,7 @@ def create_vocoder_executor(
     incremental_codec_cuda_graph_min_free_gb: float = 3.0,
     suppress_bootstrap_silence: bool = True,
     suppress_bootstrap_max_streams: int = 24,
+    running_stream_count: int | None = None,
 ) -> Qwen3TTSStreamingVocoderScheduler:
     device = str(resolve_concrete_device(device, gpu_id))
     # note (luojiaxuan): the graph and compile switches follow the decoder
@@ -444,4 +446,5 @@ def create_vocoder_executor(
     # publishes readiness, so CUDA capture cannot overlap request-time GPU work
     # from colocated stages.
     scheduler.warmup_now()
+    scheduler.log_cuda_graph_coverage(running_stream_count)
     return scheduler

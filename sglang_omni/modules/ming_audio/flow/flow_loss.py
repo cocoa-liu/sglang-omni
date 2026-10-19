@@ -8,8 +8,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from sglang_omni.models.ming_omni.talker.talker_module.cfm import get_epss_timesteps
-from sglang_omni.models.ming_omni.talker.talker_module.dit import DiT
+from sglang_omni.modules.ming_audio.flow.cfm import get_epss_timesteps
+from sglang_omni.modules.ming_audio.flow.dit import DiT
 
 
 def build_cfm_timesteps(
@@ -216,7 +216,7 @@ class CFM(nn.Module):
 
 
 class FlowLoss(nn.Module):
-    """Ming-Omni-TTS flow-matching latent head."""
+    """Ming flow-matching latent head shared by Ming TTS checkpoints."""
 
     def __init__(
         self,

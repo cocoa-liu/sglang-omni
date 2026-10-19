@@ -8,11 +8,13 @@ pass, sampling, logit post-processing, and output extraction.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Generic, Protocol, TypeAlias
 
 import torch
+from sglang.srt.utils.common import is_pin_memory_available
 
 from sglang_omni.model_runner.model_worker import ModelWorker
 from sglang_omni.model_runner.prefill_inputs import clear_omni_prefill_inputs
@@ -901,6 +903,10 @@ class ModelRunner(Generic[RequestDataInput]):
     ) -> None:
         """Called after output tokens are materialized into RequestOutput."""
 
+    def model_info(self) -> Mapping[str, object]:
+        """Model-specific entries the model_info admin action adds to the worker's."""
+        return {}
+
     def on_request_finished(self, request_id: str, req_data: RequestDataInput) -> None:
         """Drain per-request state on any non-abort finish.
 
@@ -1074,8 +1080,10 @@ class ModelRunner(Generic[RequestDataInput]):
                 pass
             row_seeds.append(seed)
         sampling_info.sampling_seed = torch.tensor(
-            row_seeds, dtype=torch.long, device=sampling_info.device
-        )
+            row_seeds,
+            dtype=torch.long,
+            pin_memory=is_pin_memory_available(sampling_info.device),
+        ).to(sampling_info.device, non_blocking=True)
 
     @staticmethod
     def validate_seeded_sampling_supported(sampling_info: SamplingBatchInfo) -> None:

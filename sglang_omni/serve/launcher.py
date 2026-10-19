@@ -25,6 +25,7 @@ Export a config to JSON::
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -142,7 +143,42 @@ class PipelineUvicornServer(uvicorn.Server):
     the interpreter before ``_run_server`` can stop spawned pipeline workers.
     The pipeline launcher owns child-process cleanup, so it restores the
     original handlers but deliberately consumes the already-handled signal.
+
+    The optional startup GC freeze is process-wide and lasts until serve exits.
     """
+
+    def __init__(
+        self,
+        config: uvicorn.Config,
+        *,
+        freeze_api_gc_on_startup: bool = False,
+    ) -> None:
+        super().__init__(config)
+        self.freeze_api_gc_on_startup: bool = freeze_api_gc_on_startup
+        self.has_frozen_api_gc: bool = False
+
+    async def serve(self, sockets: list[socket.socket] | None = None) -> None:
+        try:
+            await super().serve(sockets=sockets)
+        finally:
+            if self.has_frozen_api_gc:
+                gc.unfreeze()
+                self.has_frozen_api_gc = False
+            else:
+                pass
+
+    async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+        await super().startup(sockets=sockets)
+        if self.started and self.freeze_api_gc_on_startup:
+            # note (yxs): New request cycles retain normal GC outside the startup graph.
+            gc.collect()
+            gc.freeze()
+            self.has_frozen_api_gc = True
+            logger.info(
+                f"Frozen API startup object graph ({gc.get_freeze_count()} objects)"
+            )
+        else:
+            pass
 
     @contextmanager
     def capture_signals(self) -> Generator[None, None, None]:
@@ -638,6 +674,9 @@ async def run_server(
         app = create_app(
             client,
             model_name=model_name or pipeline_config.name,
+            supports_image_api=pipeline_config.supports_image_api,
+            image_decode_mode=pipeline_config.image_decode_mode(),
+            image_decode_steps=pipeline_config.image_decode_steps(),
             requires_uploaded_voice_for_named_voice=(
                 pipeline_config.requires_uploaded_voice_for_named_voice()
             ),
@@ -669,6 +708,7 @@ async def run_server(
             tts_batch_max_items=tts_batch_max_items,
             architectures=[pipeline_config.architecture],
             audio_chunking=pipeline_config.resolved_audio_chunking,
+            interleaved_output=type(pipeline_config).interleaved_output,
         )
         profiler_dir = os.environ.get("SGLANG_TORCH_PROFILER_DIR")
         profiler_ctl = ProfilerControlClient(mp_runner.stage_control_endpoints)
@@ -693,7 +733,10 @@ async def run_server(
             log_level=log_level,
             timeout_keep_alive=KEEP_ALIVE_S,
         )
-        server = PipelineUvicornServer(config)
+        server = PipelineUvicornServer(
+            config,
+            freeze_api_gc_on_startup=pipeline_config.freeze_api_gc_on_startup,
+        )
         # note (ratish): a wildcard bind address is not a destination, so the
         # server reaches itself on loopback.
         if not host or host == "0.0.0.0":

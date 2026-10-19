@@ -200,7 +200,7 @@ def test_running_server_hands_out_its_process_and_streams_only_its_own_log(
         "import time; print('server is ready', flush=True); time.sleep(60)",
     ]
     with servers_module.running_server(
-        "judge server", command, "0", 30000, log_file, "/v1/models", "qwen"
+        "judge server", command, "0", 30000, log_file, "/v1/models", "qwen", {}
     ) as server:
         wait_until(lambda: followed(caplog) == ["[judge-server] server is ready"])
         server.ensure_alive("during the v1.5 Qwen judge")

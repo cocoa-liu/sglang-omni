@@ -566,3 +566,44 @@ def test_stage_admin_dispatches_to_scheduler() -> None:
         assert result_msg.result.data["action"] == "pause_generation"
 
     asyncio.run(run())
+
+
+def test_omni_scheduler_model_info_adds_the_model_runner_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sglang_omni.scheduling import omni_scheduler
+    from sglang_omni.scheduling.omni_scheduler import OmniScheduler
+
+    monkeypatch.setattr(
+        omni_scheduler,
+        "get_model",
+        lambda: SimpleNamespace(model_path="/ckpt", load_format="auto"),
+    )
+    monkeypatch.setattr(
+        omni_scheduler, "get_serving", lambda: SimpleNamespace(weight_version="v1")
+    )
+    scheduler = object.__new__(OmniScheduler)
+    scheduler.model_worker = SimpleNamespace(
+        model_info=lambda: {"prefill_cuda_graph": {"replay_count": 3}}
+    )
+    scheduler.model_runner = SimpleNamespace(
+        model_info=lambda: {"predictor_cuda_graph": {"replays": 5}}
+    )
+    scheduler.request_admission_lock = threading.Lock()
+    scheduler.pending_request_builds = {}
+    scheduler.pending_request_admissions = {}
+    scheduler.backlogged_request_build_payloads = []
+    scheduler.waiting_queue = []
+    scheduler.tp_rank = 0
+    scheduler.tp_size = 1
+    scheduler._engine_paused = False  # noqa: leading-underscore  # production name
+    scheduler.request_build_max_workers = 1
+    scheduler.request_build_max_pending = 16
+    scheduler.request_build_max_pending_observed = 0
+    scheduler.running_batch = SimpleNamespace(reqs=[])
+
+    result = OmniScheduler.admin_model_info(scheduler)
+
+    assert result["data"]["prefill_cuda_graph"] == {"replay_count": 3}
+    assert result["data"]["predictor_cuda_graph"] == {"replays": 5}
+    assert result["data"]["weight_version"] == "v1"

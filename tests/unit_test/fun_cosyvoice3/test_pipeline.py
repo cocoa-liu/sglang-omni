@@ -153,6 +153,7 @@ def test_fun_cosyvoice3_config_and_registry_contract() -> None:
         "enable_flow_cuda_graph": True,
         "enable_flow_prefix_cuda_graph": True,
         "enable_flow_whole_history_cuda_graph": True,
+        "enable_hift_cuda_graph": True,
         "enable_flow_estimator_trt": False,
         "token_hop_len": 25,
         "token_max_hop_len": 100,

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Qwen3-Omni code2wav whose convolutions run channels last and whose pre-transformer runs on
-fused kernels."""
+fused kernels, and its incremental decode from a codec state pool."""
 
 from __future__ import annotations
 
@@ -18,11 +18,23 @@ from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
     Qwen3OmniMoeCode2Wav,
     Qwen3OmniMoeCode2WavDecoderBlock,
     Qwen3OmniMoeCode2WavDecoderResidualUnit,
+    Qwen3OmniMoeCode2WavTransformerLayer,
     Qwen3OmniMoeCode2WavTransformerModel,
     Qwen3OmniMoeConvNeXtBlock,
     SnakeBeta,
 )
 
+from sglang_omni.models.qwen3_omni.components.codec_state_pool import (
+    CodecStatePool,
+    CodecStateSpec,
+    RingAddresses,
+    ring_addresses,
+)
+from sglang_omni.models.qwen3_omni.components.incremental_codec import (
+    SlotDecode,
+    conv_stack_state_layout,
+    slot_conv_stack,
+)
 from sglang_omni.platforms.interface import JointRopeInplaceKernel
 from sglang_omni.utils.channels_last_conv import (
     channels_last_conv1d,
@@ -94,6 +106,7 @@ class FusedCode2WavTransformer(torch.nn.Module):
         self,
         transformer: Qwen3OmniMoeCode2WavTransformerModel,
         rope: JointRopeInplaceKernel,
+        max_positions: int,
     ) -> None:
         super().__init__()
         rotary = transformer.rotary_emb
@@ -103,7 +116,7 @@ class FusedCode2WavTransformer(torch.nn.Module):
         self.transformer = transformer
         self.rope = rope
         positions = torch.arange(
-            transformer.config.max_position_embeddings,
+            max_positions,
             device=rotary.inv_freq.device,
             dtype=torch.float32,
         )
@@ -143,51 +156,15 @@ class FusedCode2WavTransformer(torch.nn.Module):
             window_mask = (key <= query) & (query - key < sliding_window)
         hidden_states = inputs_embeds.reshape(batch_size * length, hidden_size)
         for layer in self.transformer.layers:
-            attention = layer.self_attn
-            residual = hidden_states
-            normed = rmsnorm(
-                hidden_states,
-                layer.input_layernorm.weight,
-                layer.input_layernorm.variance_epsilon,
+            query, key, value = self.rotated_qkv(layer, hidden_states, positions)
+            attended = self.attend(
+                layer,
+                query.view(batch_size, length, -1, head_dim),
+                key.view(batch_size, length, -1, head_dim),
+                value.view(batch_size, length, -1, head_dim),
+                window_mask,
             )
-            query, key, value = F.linear(normed, attention.qkv_weight).split(
-                [
-                    attention.q_proj.out_features,
-                    attention.k_proj.out_features,
-                    attention.v_proj.out_features,
-                ],
-                dim=-1,
-            )
-            query = query.view(batch_size * length, -1, head_dim)
-            key = key.view(batch_size * length, -1, head_dim)
-            self.rope(query, key, self.cos_sin_cache, positions, is_neox=True)
-            attended = F.scaled_dot_product_attention(
-                query.view(batch_size, length, -1, head_dim).transpose(1, 2),
-                key.view(batch_size, length, -1, head_dim).transpose(1, 2),
-                value.view(batch_size, length, -1, head_dim).transpose(1, 2),
-                attn_mask=window_mask,
-                is_causal=window_mask is None,
-                scale=attention.scaling,
-                enable_gqa=attention.num_key_value_groups > 1,
-            )
-            attended = attended.transpose(1, 2).reshape(batch_size * length, -1)
-            hidden_states = torch.addcmul(
-                residual,
-                layer.self_attn_layer_scale.scale,
-                F.linear(attended, attention.o_proj.weight),
-            )
-            residual = hidden_states
-            normed = rmsnorm(
-                hidden_states,
-                layer.post_attention_layernorm.weight,
-                layer.post_attention_layernorm.variance_epsilon,
-            )
-            activated = silu_and_mul(F.linear(normed, layer.mlp.gate_up_weight))
-            hidden_states = torch.addcmul(
-                residual,
-                layer.mlp_layer_scale.scale,
-                F.linear(activated, layer.mlp.down_proj.weight),
-            )
+            hidden_states = self.layer_output(layer, hidden_states, attended)
         hidden_states = rmsnorm(
             hidden_states,
             self.transformer.norm.weight,
@@ -195,6 +172,141 @@ class FusedCode2WavTransformer(torch.nn.Module):
         )
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states.view(batch_size, length, hidden_size)
+        )
+
+    def forward_slot_frames(
+        self,
+        inputs_embeds: torch.Tensor,
+        pool: CodecStatePool,
+        addresses: RingAddresses,
+        *,
+        first_decode: bool,
+    ) -> torch.Tensor:
+        """The normed hidden states of the rows' new frames. Every layer stores its new K/V in
+        the rows' rings; a first decode attends to its own frames, a later one to its window in
+        the ring."""
+        batch_size, length, hidden_size = inputs_embeds.shape
+        head_dim = self.transformer.layers[0].self_attn.head_dim
+        sliding_window = self.transformer.config.sliding_window
+        frame_offsets = torch.arange(length, device=inputs_embeds.device)
+        if first_decode and length <= sliding_window:
+            window_mask = None
+        elif first_decode:
+            distances = frame_offsets[:, None] - frame_offsets[None, :]
+            window_mask = (distances >= 0) & (distances < sliding_window)
+        else:
+            # note (ratish): window rows run in position order, a row's new frames last.
+            query_offsets = (addresses.window_lengths - length)[:, None] + frame_offsets
+            distances = query_offsets[:, :, None] - torch.arange(
+                pool.ring_frames, device=inputs_embeds.device
+            )
+            window_mask = ((distances >= 0) & (distances < sliding_window))[:, None]
+        hidden_states = inputs_embeds.reshape(batch_size * length, hidden_size)
+        for layer_index, layer in enumerate(self.transformer.layers):
+            query, key, value = self.rotated_qkv(
+                layer, hidden_states, addresses.frame_positions
+            )
+            pool.keys[layer_index].index_copy_(
+                0, addresses.write_rows, key.reshape(batch_size * length, -1)
+            )
+            pool.values[layer_index].index_copy_(0, addresses.write_rows, value)
+            if first_decode:
+                keys = key.view(batch_size, length, -1, head_dim)
+                values = value.view(batch_size, length, -1, head_dim)
+            else:
+                keys = pool.keys[layer_index][addresses.window_rows].view(
+                    batch_size, pool.ring_frames, -1, head_dim
+                )
+                values = pool.values[layer_index][addresses.window_rows].view(
+                    batch_size, pool.ring_frames, -1, head_dim
+                )
+            attended = self.attend(
+                layer,
+                query.view(batch_size, length, -1, head_dim),
+                keys,
+                values,
+                window_mask,
+            )
+            hidden_states = self.layer_output(layer, hidden_states, attended)
+        hidden_states = rmsnorm(
+            hidden_states,
+            self.transformer.norm.weight,
+            self.transformer.norm.variance_epsilon,
+        )
+        return hidden_states.view(batch_size, length, hidden_size)
+
+    def rotated_qkv(
+        self,
+        layer: Qwen3OmniMoeCode2WavTransformerLayer,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """The layer's (tokens, heads, head_dim) query and key rotated at positions, and its
+        (tokens, kv_heads * head_dim) value, from one qkv GEMM."""
+        attention = layer.self_attn
+        normed = rmsnorm(
+            hidden_states,
+            layer.input_layernorm.weight,
+            layer.input_layernorm.variance_epsilon,
+        )
+        query, key, value = F.linear(normed, attention.qkv_weight).split(
+            [
+                attention.q_proj.out_features,
+                attention.k_proj.out_features,
+                attention.v_proj.out_features,
+            ],
+            dim=-1,
+        )
+        query = query.view(hidden_states.shape[0], -1, attention.head_dim)
+        key = key.view(hidden_states.shape[0], -1, attention.head_dim)
+        self.rope(query, key, self.cos_sin_cache, positions, is_neox=True)
+        return query, key, value
+
+    def attend(
+        self,
+        layer: Qwen3OmniMoeCode2WavTransformerLayer,
+        query: torch.Tensor,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+        window_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """SDPA of (B, L, heads, head_dim) queries over (B, S, kv_heads, head_dim) keys and
+        values, causal without a mask, as (B * L, heads * head_dim)."""
+        attention = layer.self_attn
+        attended = F.scaled_dot_product_attention(
+            query.transpose(1, 2),
+            keys.transpose(1, 2),
+            values.transpose(1, 2),
+            attn_mask=window_mask,
+            is_causal=window_mask is None,
+            scale=attention.scaling,
+            enable_gqa=attention.num_key_value_groups > 1,
+        )
+        return attended.transpose(1, 2).reshape(query.shape[0] * query.shape[1], -1)
+
+    def layer_output(
+        self,
+        layer: Qwen3OmniMoeCode2WavTransformerLayer,
+        residual: torch.Tensor,
+        attended: torch.Tensor,
+    ) -> torch.Tensor:
+        """The layer's output: its attention projection, then its SwiGLU MLP, each added to the
+        residual by the layer scale in one kernel."""
+        hidden_states = torch.addcmul(
+            residual,
+            layer.self_attn_layer_scale.scale,
+            F.linear(attended, layer.self_attn.o_proj.weight),
+        )
+        normed = rmsnorm(
+            hidden_states,
+            layer.post_attention_layernorm.weight,
+            layer.post_attention_layernorm.variance_epsilon,
+        )
+        activated = silu_and_mul(F.linear(normed, layer.mlp.gate_up_weight))
+        return torch.addcmul(
+            hidden_states,
+            layer.mlp_layer_scale.scale,
+            F.linear(activated, layer.mlp.down_proj.weight),
         )
 
 
@@ -214,9 +326,14 @@ class Qwen3OmniCode2Wav(Qwen3OmniMoeCode2Wav):
                 pass
         self.is_channels_last = True
 
-    def use_fused_transformer(self, rope: JointRopeInplaceKernel) -> None:
-        """Run the pre-transformer on fused kernels, with rope as its rotary kernel."""
-        self.pre_transformer = FusedCode2WavTransformer(self.pre_transformer, rope)
+    def use_fused_transformer(
+        self, rope: JointRopeInplaceKernel, max_positions: int
+    ) -> None:
+        """Run the pre-transformer on fused kernels, with rope as its rotary kernel for
+        frames at positions below max_positions."""
+        self.pre_transformer = FusedCode2WavTransformer(
+            self.pre_transformer, rope, max_positions
+        )
 
     def forward(self, codes: torch.Tensor) -> torch.Tensor:
         if not self.is_channels_last:
@@ -238,3 +355,73 @@ class Qwen3OmniCode2Wav(Qwen3OmniMoeCode2Wav):
         for block in self.decoder:
             hidden_states = channels_last_block(block, hidden_states)
         return hidden_states.transpose(1, 2).clamp(min=-1, max=1)
+
+
+class Qwen3OmniIncrementalCodec:
+    """Decodes streams' new codec frames from their slots in a codec state pool: a stream's
+    frames decoded in any split give the waveform Qwen3OmniCode2Wav gives on all of them at
+    once."""
+
+    def __init__(self, model: Qwen3OmniCode2Wav) -> None:
+        assert self.supports(
+            model
+        ), "slot decodes need the fused channels-last code2wav"
+        self.model = model
+        transformer = model.pre_transformer.transformer
+        conv_histories, transconv_overlaps = conv_stack_state_layout(model)
+        self.spec = CodecStateSpec(
+            conv_histories=tuple(conv_histories),
+            transconv_overlaps=tuple(transconv_overlaps),
+            num_layers=len(transformer.layers),
+            num_key_value_heads=transformer.config.num_key_value_heads,
+            head_dim=transformer.layers[0].self_attn.head_dim,
+            retained_context=transformer.window_size - 1,
+        )
+
+    @staticmethod
+    def supports(model: Qwen3OmniCode2Wav) -> bool:
+        """Slot decodes run the fused transformer on channels-last activations."""
+        return (
+            isinstance(model.pre_transformer, FusedCode2WavTransformer)
+            and model.is_channels_last
+        )
+
+    def decode_slots(
+        self,
+        codes: torch.Tensor,
+        pool: CodecStatePool,
+        slot_index: torch.Tensor,
+        *,
+        first_decode: bool,
+    ) -> torch.Tensor:
+        """The (B, 1, samples) waveform of the (B, Q, T) codes after the frames the rows' slots
+        hold, their state advanced in place; a graph captures it with a static index. A first
+        decode starts every row's stream and reads no slot."""
+        new_frames = codes.shape[-1]
+        assert new_frames + (0 if first_decode else pool.retained_frames) <= (
+            pool.ring_frames
+        ), "a decode's window and new frames fit the ring"
+        if first_decode:
+            start_positions = torch.zeros_like(slot_index)
+        else:
+            start_positions = pool.frame_positions[slot_index]
+        addresses = ring_addresses(
+            slot_index,
+            start_positions,
+            new_frames,
+            pool.ring_frames,
+            pool.retained_frames,
+        )
+        hidden_states = self.model.code_embedding(codes + self.model.code_offset).mean(
+            1
+        )
+        hidden_states = self.model.pre_transformer.forward_slot_frames(
+            hidden_states, pool, addresses, first_decode=first_decode
+        )
+        waveform = slot_conv_stack(
+            self.model,
+            hidden_states,
+            SlotDecode(pool=pool, slot_index=slot_index, is_cold=first_decode),
+        )
+        pool.frame_positions.index_put_((slot_index,), start_positions + new_frames)
+        return waveform

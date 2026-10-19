@@ -23,8 +23,13 @@ from sglang_omni.models.fun_cosyvoice3.utils import (
     SpeakerEncoder,
     SpeechTokenizerV3,
 )
+from sglang_omni.platforms import current_platform
 from sglang_omni.proto.request import StagePayload
-from sglang_omni.scheduling.engine_factory import GenerationDefaults, TtsEngineBuilder
+from sglang_omni.scheduling.engine_factory import (
+    GenerationDefaults,
+    SchedulerExtras,
+    TtsEngineBuilder,
+)
 from sglang_omni.scheduling.sglang_backend.output_processor import SGLangOutputProcessor
 from sglang_omni.utils.checkpoint import resolve_checkpoint as _resolve_checkpoint
 
@@ -109,7 +114,9 @@ class FunCosyVoice3EngineBuilder(TtsEngineBuilder[CosyVoice3SGLangRequestData]):
             "enable_torch_compile": False,
             "mem_fraction_static": 0.85,
             "max_prefill_tokens": 4096,
-            "sampling_backend": "pytorch",
+            "sampling_backend": (
+                "flashinfer" if current_platform.is_cuda() else "pytorch"
+            ),
             "trust_remote_code": True,
         }
 
@@ -213,6 +220,11 @@ class FunCosyVoice3EngineBuilder(TtsEngineBuilder[CosyVoice3SGLangRequestData]):
         Callable[[CosyVoice3SGLangRequestData], StagePayload],
     ]:
         return request_builders.make_cosyvoice3_scheduler_adapters(model=model)
+
+    def extra_scheduler_kwargs(self) -> SchedulerExtras[CosyVoice3SGLangRequestData]:
+        # note (ratish): the vocoder shares this process and card on its own stream, and
+        # at equal priority the AR's decode replays wait behind its kernels.
+        return {"should_run_top_priority_stream": current_platform.is_cuda()}
 
     def make_abort_callback(self) -> Callable[[str], None]:
         return request_builders.cleanup_prepared_cosyvoice3_request

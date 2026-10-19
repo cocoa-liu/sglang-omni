@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import gc
 import importlib
 import logging
+import math
 import os
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -50,6 +52,12 @@ from sglang_omni.models.fun_cosyvoice3.flow_estimator_trt import (
     execute_flow_estimator,
     is_flow_estimator_trt,
 )
+from sglang_omni.models.fun_cosyvoice3.hift_cuda_graph import HiftDecodeCudaGraphRunner
+from sglang_omni.models.fun_cosyvoice3.hift_kernels import (
+    overlap_add_inverse,
+    short_time_spectrum,
+    snake,
+)
 from sglang_omni.models.fun_cosyvoice3.packed_dit import (
     DIT_INDUCTOR_OPTIONS,
     FA3_DTYPES,
@@ -74,8 +82,15 @@ from sglang_omni.models.fun_cosyvoice3.request_builders import (
     cleanup_prepared_cosyvoice3_request,
     preprocess_cosyvoice3_payload,
 )
-from sglang_omni.models.fun_cosyvoice3.solve_graph_capture import SolveGraphCapture
-from sglang_omni.models.fun_cosyvoice3.streaming import TOKEN_HOP_LEN, TOKEN_MAX_HOP_LEN
+from sglang_omni.models.fun_cosyvoice3.solve_graph_capture import (
+    SolveGraphCapture,
+    row_tiers,
+)
+from sglang_omni.models.fun_cosyvoice3.streaming import (
+    PRE_LOOKAHEAD_LEN,
+    TOKEN_HOP_LEN,
+    TOKEN_MAX_HOP_LEN,
+)
 from sglang_omni.models.fun_cosyvoice3.whole_history_cuda_graph import (
     WholeHistoryCudaGraphRunner,
 )
@@ -1306,6 +1321,77 @@ def keep_hift_constants_on_device(hift: "CausalHiFTGenerator", device: str) -> N
     hift.f0_predictor.to(torch.float64)
 
 
+def patch_hift_snake(hift: "CausalHiFTGenerator") -> None:
+    """Run each of HiFT's float32 Snake activations as one kernel, bit for bit, where
+    CosyVoice's forward launches seven."""
+    try:
+        from cosyvoice.transformer.activation import Snake
+    except ImportError as exc:
+        raise RuntimeError(COSYVOICE_INSTALL_HINT) from exc
+
+    for module in hift.modules():
+        if isinstance(module, Snake):
+            assert not module.alpha_logscale, "HiFT builds linear scale alphas"
+            alpha = module.alpha.detach().contiguous()
+            inverse_alpha = 1.0 / (alpha + module.no_div_by_zero)
+
+            def forward(
+                x: torch.Tensor,
+                alpha: torch.Tensor = alpha,
+                inverse_alpha: torch.Tensor = inverse_alpha,
+            ) -> torch.Tensor:
+                return snake(x, alpha, inverse_alpha)
+
+            module.forward = forward
+        else:
+            pass
+
+
+def patch_hift_spectra(hift: "CausalHiFTGenerator", device: torch.device) -> None:
+    """Give HiFT its STFT and inverse STFT as the float32 kernels: no cuFFT plan per new
+    shape, whose module load waits for the device, and no host read of the inverse's
+    window envelope, which a CUDA graph cannot capture."""
+    n_fft = hift.istft_params["n_fft"]
+    hop_length = hift.istft_params["hop_len"]
+    bins = n_fft // 2 + 1
+    window = hift.stft_window.to(device=device, dtype=torch.float64)
+    angle = (2 * math.pi / n_fft) * torch.outer(
+        torch.arange(bins, device=device, dtype=torch.float64),
+        torch.arange(n_fft, device=device, dtype=torch.float64),
+    )
+    forward_basis = (torch.cat([torch.cos(angle), -torch.sin(angle)]) * window).float()
+    # note (ratish): a one sided inverse counts the bins between DC and Nyquist twice.
+    one_sided = torch.full((bins, 1), 2.0, device=device, dtype=torch.float64)
+    one_sided[0] = 1.0
+    one_sided[-1] = 1.0
+    inverse_basis = (
+        torch.cat([torch.cos(angle) * one_sided, -torch.sin(angle) * one_sided])
+        * window
+        / n_fft
+    ).float()
+    squared_window = hift.stft_window.to(device).pow(2)
+
+    def stft(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        padded_signal = F.pad(x[:, None], (n_fft // 2, n_fft // 2), mode="reflect")[
+            :, 0
+        ].contiguous()
+        spectrum = short_time_spectrum(padded_signal, forward_basis, hop_length)
+        return spectrum[:, :bins], spectrum[:, bins:]
+
+    def istft(magnitude: torch.Tensor, phase: torch.Tensor) -> torch.Tensor:
+        magnitude = torch.clip(magnitude, max=1e2)
+        return overlap_add_inverse(
+            (magnitude * torch.cos(phase)).contiguous(),
+            (magnitude * torch.sin(phase)).contiguous(),
+            inverse_basis,
+            squared_window,
+            hop_length,
+        )
+
+    hift._stft = stft  # noqa: leading-underscore  # upstream name
+    hift._istft = istft  # noqa: leading-underscore  # upstream name
+
+
 def load_cosyvoice3_flow_hift_lightweight(
     checkpoint_dir: str,
     *,
@@ -1720,9 +1806,11 @@ class CosyVoice3Vocoder(BatchVocoderBase[FunCosyVoice3State, torch.Tensor]):
         self.hift_hold_frames = (
             hift.f0_predictor.condnet[0].causal_padding + hift.conv_pre_look_right + 1
         )
-        # note(ratish): the AR shares this process and the default stream; on its
-        # own stream the vocoder's kernels and host copies do not queue behind the
-        # AR's. It waits once for what the default stream holds at this point.
+        self.hift_decode_cuda_graph_runner: HiftDecodeCudaGraphRunner | None = None
+        # note(ratish): the AR shares this process and card on its own top priority
+        # stream; on a stream of its own the vocoder's kernels and host copies do not
+        # queue behind the AR's. It waits once for what the default stream holds at
+        # this point.
         device = next(self.flow.parameters()).device
         if device.type == "cuda":
             stream = torch.cuda.Stream(device=device)
@@ -1730,8 +1818,19 @@ class CosyVoice3Vocoder(BatchVocoderBase[FunCosyVoice3State, torch.Tensor]):
             self.stream_context: contextlib.AbstractContextManager[None] = (
                 torch.cuda.stream(stream)
             )
+            # note (ratish): a ROCm device is a cuda device too, and the kernels' inline
+            # PTX cannot compile there.
+            self.has_hift_kernels = (
+                current_platform.is_cuda() and self.hift_autocast_dtype is None
+            )
+            if self.has_hift_kernels:
+                patch_hift_snake(hift)
+                patch_hift_spectra(hift, device)
+            else:
+                pass
         else:
             self.stream_context = contextlib.nullcontext()
+            self.has_hift_kernels = False
 
     def prepare_item(
         self, payload: StagePayload
@@ -2047,6 +2146,19 @@ class CosyVoice3Vocoder(BatchVocoderBase[FunCosyVoice3State, torch.Tensor]):
         ]
         max_history_frames = max(history_frame_counts)
         max_window_frames = max(window_frame_counts)
+        runner = self.hift_decode_cuda_graph_runner
+        # note (ratish): a final from frame 0 needs both its own edges, so it keeps its
+        # width and the eager decode.
+        if runner is None or any(
+            window.row.is_final and window.start_frame == 0 for window in windows
+        ):
+            frame_tier = None
+        else:
+            frame_tier = runner.frame_tier(max_window_frames)
+        if frame_tier is not None:
+            max_window_frames = frame_tier
+        else:
+            pass
         mel_history = windows[0].row.history.new_zeros(
             len(windows), channels, max_history_frames
         )
@@ -2103,7 +2215,10 @@ class CosyVoice3Vocoder(BatchVocoderBase[FunCosyVoice3State, torch.Tensor]):
                     * samples_per_frame : history_frames
                     * samples_per_frame,
                 ]
-        speech = hift.decode(x=window_mel, s=window_source, finalize=True)
+        if frame_tier is None:
+            speech = hift.decode(x=window_mel, s=window_source, finalize=True)
+        else:
+            speech = runner.run(window_mel, window_source)
         speech = speech.detach().cpu()
         return [
             (
@@ -2255,6 +2370,7 @@ def create_vocoder_executor(
     enable_flow_cuda_graph: bool = True,
     enable_flow_prefix_cuda_graph: bool,
     enable_flow_whole_history_cuda_graph: bool,
+    enable_hift_cuda_graph: bool,
     flow_cuda_graph_capture_shapes: tuple[tuple[int, int], ...] | None = None,
     enable_flow_estimator_trt: bool = False,
     hift_dtype: str = "float32",
@@ -2427,21 +2543,40 @@ def create_vocoder_executor(
         and autocast_dtype in FA3_DTYPES
         and len(whole_history_tier_frames) > 0
     )
-    if has_prefix_graphs or has_whole_history_graphs:
+    token_mel_ratio = flow.token_mel_ratio
+    if disable_hop_growth:
+        longest_hop_tokens = token_hop_len
+    else:
+        longest_hop_tokens = token_max_hop_len
+    # note (ratish): the shortest window is a first hop's; the longest a final's, the
+    # tokens after the last hop (less than a hop, and the lookahead) with the frames
+    # that hop held and the decode's context before them.
+    shortest_window_frames = token_hop_len * token_mel_ratio
+    longest_window_frames = (
+        (longest_hop_tokens + PRE_LOOKAHEAD_LEN - 1) * token_mel_ratio
+        + vocoder.hift_hold_frames
+        + HIFT_DECODE_CONTEXT_FRAMES
+    )
+    first_tier = bisect.bisect_left(whole_history_tier_frames, shortest_window_frames)
+    last_tier = bisect.bisect_left(whole_history_tier_frames, longest_window_frames)
+    hift_tier_frames = whole_history_tier_frames[first_tier : last_tier + 1]
+    # note (ratish): torch.istft reads its window envelope on the host, so HiFT's decode
+    # captures only with the vocoder's kernels.
+    has_hift_graphs = (
+        enable_hift_cuda_graph
+        and vocoder.has_hift_kernels
+        and len(hift_tier_frames) > 0
+    )
+    if has_prefix_graphs or has_whole_history_graphs or has_hift_graphs:
         graph_backend = current_platform.get_device_graph_backend(device_obj)
-        assert graph_backend is not None and flow.packed_estimator is not None
-        assert autocast_dtype is not None
+        assert graph_backend is not None
         solve_graphs = SolveGraphCapture(
             graph_backend, device=device_obj, autocast_dtype=autocast_dtype
         )
     else:
         pass
     if has_prefix_graphs:
-        token_mel_ratio = flow.token_mel_ratio
-        if disable_hop_growth:
-            longest_hop_tokens = token_hop_len
-        else:
-            longest_hop_tokens = token_max_hop_len
+        assert flow.packed_estimator is not None
         prefix_cuda_graph_runner = PrefixCudaGraphRunner(
             flow.packed_estimator,
             flow.prefix_pool,
@@ -2461,6 +2596,7 @@ def create_vocoder_executor(
     else:
         pass
     if has_whole_history_graphs:
+        assert flow.packed_estimator is not None
         whole_history_cuda_graph_runner = WholeHistoryCudaGraphRunner(
             flow.packed_estimator,
             graphs=solve_graphs,
@@ -2475,6 +2611,19 @@ def create_vocoder_executor(
         )
         whole_history_cuda_graph_runner.capture()
         flow.whole_history_cuda_graph_runner = whole_history_cuda_graph_runner
+    else:
+        pass
+    if has_hift_graphs:
+        hift_decode_cuda_graph_runner = HiftDecodeCudaGraphRunner(
+            hift,
+            graphs=solve_graphs,
+            mel_channels=flow.output_size,
+            samples_per_frame=vocoder.hift_samples_per_mel_frame,
+            row_tiers=row_tiers(max_batch_size),
+            frame_tiers=hift_tier_frames,
+        )
+        hift_decode_cuda_graph_runner.capture()
+        vocoder.hift_decode_cuda_graph_runner = hift_decode_cuda_graph_runner
     else:
         pass
     scheduler.warmup_now()
