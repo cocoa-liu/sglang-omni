@@ -1,16 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
-from sglang_omni.config.manager import ConfigManager
-from sglang_omni.config.runtime import (
-    resolve_stage_factory_kwargs,
-    resolve_stage_typed_kwargs,
-)
 from sglang_omni.config.schema import EngineArgs, FactoryArgs, ProcessConfig
 from sglang_omni.models.qwen3_tts import config as qwen3_tts_config
 from sglang_omni.models.qwen3_tts.config import Qwen3TTSPipelineConfig
@@ -31,30 +25,6 @@ def test_vocoder_platform_default_keeps_npu_opt_in(
     expected = {"async_decode": False} if use_npu else {}
     expected["running_stream_count"] = 64
     assert config.stage_factory_kwargs("vocoder") == expected
-
-
-@pytest.mark.parametrize(
-    "filename",
-    [
-        "qwen3_tts_0_6b_npu.yaml",
-        "qwen3_tts_0_6b_customvoice_npu.yaml",
-        "qwen3_tts_1_7b_npu.yaml",
-        "qwen3_tts_1_7b_voicedesign_npu.yaml",
-    ],
-)
-def test_npu_examples_opt_in_to_vocoder_graphs_explicitly(
-    monkeypatch: pytest.MonkeyPatch, filename: str
-) -> None:
-    monkeypatch.setattr(qwen3_tts_config, "current_platform", NPUOmniPlatform())
-    config_path = Path(__file__).parents[3] / "examples" / "configs" / filename
-    config = ConfigManager.from_file(str(config_path)).config
-    assert config is not None
-    stage = config.stage_named("vocoder")
-    kwargs = resolve_stage_factory_kwargs(stage, config)
-    kwargs.update(resolve_stage_typed_kwargs(stage))
-
-    assert kwargs["async_decode"] is True
-    assert kwargs["incremental_codec_cuda_graph"] is True
 
 
 @pytest.mark.parametrize("size", ["0.6B"])

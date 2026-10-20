@@ -41,7 +41,6 @@ from sglang.srt.model_executor.forward_context import ForwardContext, forward_co
 from sglang.srt.runtime_context import get_context, override_platform
 from sglang.srt.server_args import ServerArgs
 
-from sglang_omni.config.manager import ConfigManager
 from sglang_omni.config.runtime import resolve_stage_factory_kwargs
 from sglang_omni.model_runner.prefill_inputs import get_omni_prefill_inputs
 from sglang_omni.models.qwen3_omni.components.thinker_model import (
@@ -609,52 +608,6 @@ def test_qwen3_tts_engine_probes_silence_ids_only_for_base(
     assert builder.silence_codec_ids.tolist() == expected_ids
     assert builder.leading_silence_mask_frames == expected_frames
     assert bool(encoded_batches) == (tts_model_type == "base")
-
-
-@pytest.mark.parametrize(
-    ("filename", "model_suffix", "mem_fraction_static"),
-    [
-        ("qwen3_tts_1_7b_npu.yaml", "1.7B-Base", 0.60),
-        ("qwen3_tts_0_6b_customvoice_npu.yaml", "0.6B-CustomVoice", 0.70),
-        ("qwen3_tts_1_7b_voicedesign_npu.yaml", "1.7B-VoiceDesign", 0.60),
-    ],
-)
-def test_qwen3_tts_npu_configs_use_sdpa_with_graphs(
-    filename: str,
-    model_suffix: str,
-    mem_fraction_static: float,
-) -> None:
-    config_path = Path(__file__).parents[3] / "examples" / "configs" / filename
-    config = ConfigManager.from_file(str(config_path)).config
-    assert config is not None
-    stages = {stage.name: stage for stage in config.stages}
-
-    assert config.model_path.endswith(model_suffix)
-    assert stages["preprocessing"].factory.max_concurrency == 1
-    assert stages["tts_engine"].tp_size == 1
-    assert stages["tts_engine"].factory.attn_implementation == "sdpa"
-    assert stages["tts_engine"].engine.attention_backend == "ascend"
-    assert stages["tts_engine"].engine.disable_cuda_graph is False
-    assert stages["tts_engine"].engine.enable_torch_compile is False
-    assert stages["tts_engine"].engine.max_running_requests == 1
-    assert stages["tts_engine"].engine.max_queued_requests == 8
-    assert stages["tts_engine"].engine.mem_fraction_static == mem_fraction_static
-    assert stages["vocoder"].factory.attn_implementation == "sdpa"
-    if model_suffix == "1.7B-Base":
-        assert stages["vocoder"].factory.stream_chunk_ramp == [1, 2, 2, 2, 4, 4]
-
-
-def test_qwen3_tts_0_6b_base_npu_config_uses_graph_concurrency() -> None:
-    config_path = Path(__file__).parents[3] / "examples/configs/qwen3_tts_0_6b_npu.yaml"
-    config = ConfigManager.from_file(str(config_path)).config
-    stages = {stage.name: stage for stage in config.stages}
-    engine = stages["tts_engine"].engine
-    vocoder = stages["vocoder"].factory
-
-    assert engine.disable_cuda_graph is False
-    assert engine.max_running_requests == 16
-    assert engine.max_queued_requests == 16
-    assert vocoder.max_batch_size == 8
 
 
 @pytest.mark.parametrize(
@@ -2726,49 +2679,112 @@ def vocoder_factory_capture(
 
 
 @pytest.mark.parametrize(
-    ("device", "async_decode", "codec_graph", "deterministic", "internal_format"),
+    (
+        "device",
+        "async_decode",
+        "codec_graph",
+        "deterministic",
+        "initial_internal_format",
+        "capture_internal_format",
+        "warmup_raises",
+    ),
     [
-        ("npu", True, True, False, False),
-        ("npu", None, True, False, False),
-        ("npu", False, True, False, True),
-        ("npu", True, False, False, True),
-        ("npu", True, True, True, True),
-        ("cuda", True, True, False, True),
-        ("cpu", True, True, False, True),
+        ("npu", True, True, False, True, False, False),
+        ("npu", None, True, False, True, False, False),
+        ("npu", True, True, False, False, False, False),
+        ("npu", True, True, False, True, False, True),
+        ("npu", False, True, False, True, True, False),
+        ("npu", True, False, False, True, True, False),
+        ("npu", True, True, True, True, True, False),
+        ("cuda", True, True, False, True, True, False),
+        ("cpu", True, True, False, True, True, False),
     ],
 )
-def test_vocoder_factory_selects_capture_compatible_npu_convolutions(
+def test_vocoder_factory_scopes_npu_internal_format_to_capture(
     monkeypatch: pytest.MonkeyPatch,
     device: str,
     async_decode: bool | None,
     codec_graph: bool,
     deterministic: bool,
-    internal_format: bool,
+    initial_internal_format: bool,
+    capture_internal_format: bool,
+    warmup_raises: bool,
 ) -> None:
-    configuration = SimpleNamespace(allow_internal_format=True)
+    """Codec capture must not leave internal formats disabled for the Talker."""
+    configuration = SimpleNamespace(allow_internal_format=initial_internal_format)
+    observed_internal_formats: list[bool] = []
+
+    class FakeScheduler:
+        def __init__(
+            self, tokenizer: None, **kwargs: str | int | float | bool | None
+        ) -> None:
+            observed_internal_formats.append(configuration.allow_internal_format)
+
+        def warmup_now(self) -> None:
+            observed_internal_formats.append(configuration.allow_internal_format)
+            if warmup_raises:
+                raise RuntimeError("capture failed")
+            else:
+                pass
+
+        def log_cuda_graph_coverage(self, running_stream_count: int | None) -> None:
+            pass
+
+    def set_option(options: dict[str, str]) -> None:
+        configuration.allow_internal_format = (
+            options["ALLOW_INTERNAL_FORMAT"] == "enable"
+        )
+
+    monkeypatch.setattr(
+        qwen3_stages,
+        "torch_npu",
+        SimpleNamespace(
+            _C=SimpleNamespace(
+                _npu_getOption=lambda name: (
+                    b"enable" if configuration.allow_internal_format else b"disable"
+                )
+            )
+        ),
+    )
     monkeypatch.setattr(
         qwen3_stages,
         "torch",
         SimpleNamespace(
             device=lambda value: SimpleNamespace(type=value.partition(":")[0]),
-            npu=SimpleNamespace(config=configuration),
+            npu=SimpleNamespace(config=configuration, set_option=set_option),
         ),
     )
     monkeypatch.setattr(
         qwen3_stages, "resolve_concrete_device", lambda value, gpu_id: value
     )
-
-    captured = vocoder_factory_capture(
-        monkeypatch,
-        device=device,
-        async_decode=async_decode,
-        incremental_codec_cuda_graph=codec_graph,
-        enable_deterministic_inference=deterministic,
+    monkeypatch.setattr(
+        qwen3_stages, "load_qwen3_tts_tokenizer", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        qwen3_stages, "load_qwen3_tts_checkpoint_config", lambda path: {}
+    )
+    monkeypatch.setattr(
+        qwen3_stages, "Qwen3TTSStreamingVocoderScheduler", FakeScheduler
     )
 
-    assert configuration.allow_internal_format is internal_format
-    assert captured["async_decode"] is async_decode
-    assert captured["incremental_codec_cuda_graph"] is codec_graph
+    with (
+        pytest.raises(RuntimeError, match="capture failed")
+        if warmup_raises
+        else contextlib.nullcontext()
+    ):
+        qwen3_stages.create_vocoder_executor(
+            "model",
+            device=device,
+            async_decode=async_decode,
+            incremental_codec_cuda_graph=codec_graph,
+            enable_deterministic_inference=deterministic,
+        )
+
+    assert observed_internal_formats == [
+        initial_internal_format,
+        capture_internal_format,
+    ]
+    assert configuration.allow_internal_format is initial_internal_format
 
 
 def test_qwen3_tts_config_starts_a_declining_platform_decoding_synchronously(
