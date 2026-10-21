@@ -14,8 +14,10 @@ from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.models.bailing_moe_v3 import BailingMoeV3ForCausalLM
+from sglang.srt.models.qwen2 import Qwen2ForCausalLM
 from sglang.srt.runtime_context import get_exec, get_schedule
 from torch import nn
+from transformers import Qwen2Config
 
 from sglang_omni.modules.ming_audio.flow.aggregator import Aggregator
 from sglang_omni.modules.ming_audio.flow.cfm import get_epss_timesteps
@@ -51,6 +53,88 @@ class Ming3TTSConfig(BailingHybridConfig):
         self.aggregator_config: dict[str, JsonValue] = dict(aggregator_config or {})
 
 
+class Ming3DenseTTSConfig(Qwen2Config):
+    """Qwen2 backbone config for the dense Ming 3 TTS checkpoint."""
+
+    model_type: ClassVar[str] = "dense"
+
+    def __init__(
+        self,
+        llm_config: dict[str, JsonValue] | None = None,
+        ditar_config: dict[str, JsonValue] | None = None,
+        aggregator_config: dict[str, JsonValue] | None = None,
+        audio_tokenizer_config: dict[str, JsonValue] | None = None,
+        **kwargs: JsonValue,
+    ) -> None:
+        backbone_fields = dict(llm_config or {})
+        for unused_name in (
+            "model_type",
+            "architectures",
+            "auto_map",
+            "torch_dtype",
+            "transformers_version",
+            "mlp_depth",
+        ):
+            kwargs.pop(unused_name, None)
+            backbone_fields.pop(unused_name, None)
+        super().__init__(**backbone_fields)
+        # note (chenyang): AutoConfig matches the class attribute "dense",
+        # while the Qwen2 runtime reads the instance model type.
+        self.model_type = "qwen2"
+        encoder_config = dict(audio_tokenizer_config or {}).get("enc_kwargs") or {}
+        self.tts_config: dict[str, JsonValue] = {
+            "latent_dim": int(encoder_config.get("latent_dim", 64)),
+            "speaker_embedding_dim": 192,
+        }
+        self.flow_config: dict[str, JsonValue] = dict(ditar_config or {})
+        self.aggregator_config: dict[str, JsonValue] = dict(aggregator_config or {})
+        self.audio_tokenizer_config: dict[str, JsonValue] = dict(
+            audio_tokenizer_config or {}
+        )
+
+
+def install_speech_heads(
+    module: nn.Module, config: Ming3TTSConfig | Ming3DenseTTSConfig
+) -> None:
+    """Attach the flow, stop, and speaker heads shared by both backbones."""
+    latent_dim = int(config.tts_config["latent_dim"])
+    flow_config = dict(config.flow_config)
+    flow_config.pop("z_channels", None)
+    aggregator_config = dict(config.aggregator_config)
+    aggregator_config.setdefault("in_channels", latent_dim)
+    # The 0.5B checkpoint omits this key. Tiny checkpoints set it explicitly.
+    aggregator_config.setdefault("attn_backend", "torch")
+    module.flowloss = FlowLoss(
+        z_channels=latent_dim, llm_cond_dim=config.hidden_size, **flow_config
+    )
+    module.linear_proj_audio = Aggregator(
+        llm_input_dim=config.hidden_size, **aggregator_config
+    )
+    module.stop_head = nn.Linear(config.hidden_size, 2)
+    module.spk_head = nn.Linear(
+        int(config.tts_config["speaker_embedding_dim"]), config.hidden_size
+    )
+    module.flow_timesteps = get_epss_timesteps(
+        FLOW_STEPS, module.stop_head.weight.device, torch.float32
+    )
+    module.acoustic_graphs = {}
+    # note (chenyang): decode reads feedback rows from a fixed table by
+    # row id, so the backbone CUDA graph replays them through input_ids.
+    graph_config = get_exec().graph
+    decode_batch_capacity = get_schedule().max_running_requests
+    if not graph_config.disable_cuda_graph:
+        decode_batch_capacity = max(
+            decode_batch_capacity, graph_config.cuda_graph_config.decode.max_bs
+        )
+    else:
+        pass
+    module.decode_feedback = nn.Embedding(decode_batch_capacity, config.hidden_size)
+    module.decode_feedback.weight.requires_grad_(False)
+    module.decode_feedback_rows = torch.arange(
+        decode_batch_capacity, device=module.decode_feedback.weight.device
+    )
+
+
 @dataclass(kw_only=True)
 class AcousticInputs:
     """Batch-major step inputs; solver_noise is [flow steps - 1, batch, 1, latent]."""
@@ -76,87 +160,24 @@ class AcousticGraph:
     outputs: AcousticStep
 
 
-class Ming3TTSModel(BailingMoeV3ForCausalLM):
-    def __init__(
-        self,
-        *,
-        config: Ming3TTSConfig,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__(config=config, quant_config=quant_config, prefix=prefix)
-        latent_dim = int(config.tts_config["latent_dim"])
-        flow_config = dict(config.flow_config)
-        flow_config.pop("z_channels")
-        self.flowloss: FlowLoss = FlowLoss(
-            z_channels=latent_dim, llm_cond_dim=config.hidden_size, **flow_config
-        )
-        self.linear_proj_audio: Aggregator = Aggregator(
-            llm_input_dim=config.hidden_size, **config.aggregator_config
-        )
-        self.stop_head: nn.Linear = nn.Linear(config.hidden_size, 2)
-        self.spk_head: nn.Linear = nn.Linear(
-            int(config.tts_config["speaker_embedding_dim"]), config.hidden_size
-        )
-        self.flow_timesteps: torch.Tensor = get_epss_timesteps(
-            FLOW_STEPS, self.stop_head.weight.device, torch.float32
-        )
-        self.acoustic_graphs: dict[int, AcousticGraph] = {}
-        # note (chenyang): decode reads feedback rows from a fixed table by
-        # row id, so the backbone CUDA graph replays them through input_ids.
-        graph_config = get_exec().graph
-        decode_batch_capacity = get_schedule().max_running_requests
-        if not graph_config.disable_cuda_graph:
-            decode_batch_capacity = max(
-                decode_batch_capacity, graph_config.cuda_graph_config.decode.max_bs
-            )
-        else:
-            pass
-        self.decode_feedback: nn.Embedding = nn.Embedding(
-            decode_batch_capacity, config.hidden_size
-        )
-        self.decode_feedback.weight.requires_grad_(False)
-        self.decode_feedback_rows: torch.Tensor = torch.arange(
-            decode_batch_capacity, device=self.decode_feedback.weight.device
-        )
+class SpeechHeadModel:
+    """Flow, stop, and feedback heads shared by the MoE and dense backbones."""
+
+    flowloss: FlowLoss
+    linear_proj_audio: Aggregator
+    stop_head: nn.Linear
+    spk_head: nn.Linear
+    flow_timesteps: torch.Tensor
+    acoustic_graphs: dict[int, AcousticGraph]
+    decode_feedback: nn.Embedding
+    decode_feedback_rows: torch.Tensor
+    config: Ming3TTSConfig | Ming3DenseTTSConfig
 
     def stage_decode_feedback(self, feedback_embeddings: torch.Tensor) -> torch.Tensor:
         """Write one feedback row per request and return the row ids decode reads."""
         batch_size = feedback_embeddings.shape[0]
         self.decode_feedback.weight[:batch_size].copy_(feedback_embeddings)
         return self.decode_feedback_rows[:batch_size]
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        forward_batch: ForwardBatch,
-        input_embeds: torch.Tensor | None = None,
-        pp_proxy_tensors: PPProxyTensors | None = None,
-        omni_prefill_rids: list[str] | None = None,
-    ) -> LogitsProcessorOutput:
-        """Return each request's last hidden state; omni_prefill_rids belongs to Omni's interface."""
-        if forward_batch.forward_mode.is_decode():
-            input_embeds = self.decode_feedback(input_ids)
-        else:
-            pass
-        hidden_states = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            input_embeds=input_embeds,
-            forward_batch=forward_batch,
-            pp_proxy_tensors=pp_proxy_tensors,
-        )
-        if forward_batch.forward_mode.is_extend():
-            hidden_states = hidden_states[
-                torch.cumsum(forward_batch.extend_seq_lens, dim=0) - 1
-            ]
-        else:
-            pass
-        return LogitsProcessorOutput(
-            next_token_logits=hidden_states.new_empty((hidden_states.shape[0], 1)),
-            hidden_states=hidden_states,
-        )
 
     def compute_acoustic_step(
         self, inputs: AcousticInputs, sampling_scales: torch.Tensor
@@ -276,9 +297,98 @@ class Ming3TTSModel(BailingMoeV3ForCausalLM):
                     raise ValueError(f"Unexpected Ming 3 TTS weight {name}")
 
         loaded_names = super().load_weights(backbone_weights())
+        if loaded_names is None:
+            loaded_names = set()
+        else:
+            pass
         missing_head_names = sorted(set(head_tensors) - loaded_head_names)
         if missing_head_names:
             raise ValueError(f"Missing Ming 3 TTS head weights: {missing_head_names}")
         else:
             pass
         return loaded_names | loaded_head_names
+
+
+class Ming3TTSModel(SpeechHeadModel, BailingMoeV3ForCausalLM):
+    def __init__(
+        self,
+        *,
+        config: Ming3TTSConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(config=config, quant_config=quant_config, prefix=prefix)
+        install_speech_heads(self, config)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        input_embeds: torch.Tensor | None = None,
+        pp_proxy_tensors: PPProxyTensors | None = None,
+        omni_prefill_rids: list[str] | None = None,
+    ) -> LogitsProcessorOutput:
+        """Return each request's last hidden state; omni_prefill_rids belongs to Omni's interface."""
+        if forward_batch.forward_mode.is_decode():
+            input_embeds = self.decode_feedback(input_ids)
+        else:
+            pass
+        hidden_states = self.model(
+            input_ids=input_ids,
+            positions=positions,
+            input_embeds=input_embeds,
+            forward_batch=forward_batch,
+            pp_proxy_tensors=pp_proxy_tensors,
+        )
+        return hidden_state_output(hidden_states, forward_batch)
+
+
+class Ming3DenseTTSModel(SpeechHeadModel, Qwen2ForCausalLM):
+    def __init__(
+        self,
+        config: Ming3DenseTTSConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(config=config, quant_config=quant_config, prefix=prefix)
+        install_speech_heads(self, config)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        input_embeds: torch.Tensor | None = None,
+        pp_proxy_tensors: PPProxyTensors | None = None,
+        omni_prefill_rids: list[str] | None = None,
+    ) -> LogitsProcessorOutput:
+        """Return each request's last hidden state; omni_prefill_rids belongs to Omni's interface."""
+        if forward_batch.forward_mode.is_decode():
+            input_embeds = self.decode_feedback(input_ids)
+        else:
+            pass
+        hidden_states = self.model(
+            input_ids,
+            positions,
+            forward_batch,
+            input_embeds,
+            pp_proxy_tensors=pp_proxy_tensors,
+        )
+        return hidden_state_output(hidden_states, forward_batch)
+
+
+def hidden_state_output(
+    hidden_states: torch.Tensor, forward_batch: ForwardBatch
+) -> LogitsProcessorOutput:
+    """Keep the last token of a prefill and an empty logit column."""
+    if forward_batch.forward_mode.is_extend():
+        hidden_states = hidden_states[
+            torch.cumsum(forward_batch.extend_seq_lens, dim=0) - 1
+        ]
+    else:
+        pass
+    return LogitsProcessorOutput(
+        next_token_logits=hidden_states.new_empty((hidden_states.shape[0], 1)),
+        hidden_states=hidden_states,
+    )
