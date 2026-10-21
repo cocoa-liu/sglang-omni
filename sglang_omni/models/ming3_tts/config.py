@@ -52,8 +52,12 @@ def default_stages() -> list[StageConfig]:
     ]
 
 
+DENSE_ARCHITECTURE = "Ming3DenseTTSForConditionalGeneration"
+
+
 class Ming3TTSPipelineConfig(PipelineConfig):
     architecture: ClassVar[str] = "LingV3TTSForConditionalGeneration"
+    architecture_aliases: ClassVar[tuple[str, ...]] = (DENSE_ARCHITECTURE,)
     stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
         "tts_engine": EngineStageConfig,
     }

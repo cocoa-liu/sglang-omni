@@ -42,6 +42,8 @@ _AUK_MODEL_NAMES = frozenset({"auk", "auk-flash"})
 _AUK_WEIGHT_MARKERS = ("auk_base.safetensors", "auk_flash.safetensors")
 _PERSONAPLEX_ARCHITECTURE = "PersonaPlexForCausalLM"
 _PERSONAPLEX_LAYOUT_MARKER = "tokenizer_spm_32k_3.model"
+_MING3_DENSE_TTS_ARCHITECTURE = "Ming3DenseTTSForConditionalGeneration"
+_MING_OMNI_TTS_ARCHITECTURE = "BailingMMNativeForConditionalGeneration"
 
 
 def architecture_from_hf_config(hf_config: PretrainedConfig) -> str | None:
@@ -177,6 +179,32 @@ def try_resolve_arch_from_nemo_config(
     else:
         pass
     return None
+
+
+def try_resolve_ming3_dense_tts(
+    model_path: str, revision: str | None = None
+) -> str | None:
+    """Route Ming-3.0-tts-0.5B away from Ming-Omni-TTS.
+
+    Both checkpoints advertise BailingMMNativeForConditionalGeneration. The
+    0.5B checkpoint is the dense Qwen2 layout, marked by model_type dense
+    and a ditar section. Ming-Omni-TTS does not have that layout.
+    """
+    raw = load_raw_config(model_path, revision)
+    if not isinstance(raw, dict) or raw.get("model_type") != "dense":
+        return None
+    else:
+        pass
+    if "ditar_config" not in raw or "audio_tokenizer_config" not in raw:
+        return None
+    else:
+        pass
+    architectures = raw.get("architectures") or []
+    if _MING_OMNI_TTS_ARCHITECTURE not in architectures:
+        return None
+    else:
+        pass
+    return _MING3_DENSE_TTS_ARCHITECTURE
 
 
 def try_resolve_arch_from_raw_config(

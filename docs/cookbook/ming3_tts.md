@@ -1,22 +1,30 @@
-# Ming-3.0-tts-tiny
+# Ming-3.0-TTS
 
-[Ming-3.0-tts-tiny](https://huggingface.co/inclusionAI/Ming-3.0-tts-tiny) synthesizes speech from text and can clone one reference voice. A Ling V3 mixture-of-experts backbone predicts one continuous 64-dimensional latent per step through a flow-matching head. A CAM++ speaker embedding conditions the prompt, and an AudioVAE decoder turns the latents into a 44.1 kHz waveform.
+[Ming-3.0-tts-tiny](https://huggingface.co/inclusionAI/Ming-3.0-tts-tiny) and [Ming-3.0-tts-0.5B](https://huggingface.co/inclusionAI/Ming-3.0-tts-0.5B) synthesize speech from text and can clone one reference voice. A flow-matching head predicts one continuous 64-dimensional latent per step, a CAM++ speaker embedding conditions the prompt, and an AudioVAE decoder turns the latents into a 44.1 kHz waveform.
+
+Tiny uses a Ling V3 mixture-of-experts backbone. Leaving out `ref_audio` writes a zero speaker embedding. `ref_text` is accepted and does not change that embedding. The checkpoint temperature is 1.5. Speech can stop when the stop head exceeds 0.5, and not before 13 steps. `max_new_tokens` is clamped to 250.
+
+The 0.5B checkpoint uses a dense Qwen2.5-0.5B backbone. Leaving out `ref_audio` inserts no speaker token. `ref_text` is the transcript of the reference recording, and the server encodes that recording into prompt latents only when `ref_text` is present. The checkpoint temperature is 0. Speech can stop when the stop head exceeds 0.5, and not before 5 steps. `max_new_tokens` is clamped to 1000.
 
 ## Installation and Startup
 
 Install SGLang-Omni by following [Installation](../get_started/installation.md).
 
-Startup uses one GPU. Preprocessing runs on the CPU. The backbone and the VAE decoder share that GPU.
+Startup uses one GPU. Preprocessing runs on the CPU. The backbone and the VAE decoder share that GPU. The two checkpoints differ only by the model path.
 
 ```bash
 sgl-omni serve --model-path inclusionAI/Ming-3.0-tts-tiny
 ```
 
-The speech endpoint is `POST /v1/audio/speech`. The body is one complete waveform. `stream=true` still waits until that waveform is finished, then returns it as a single PCM body.
+```bash
+sgl-omni serve --model-path inclusionAI/Ming-3.0-tts-0.5B
+```
+
+The speech endpoint is `POST /v1/audio/speech`. The body is one complete waveform. `stream=true` still waits until that waveform is finished, then returns it as a single PCM body. The requests below are the same for both servers. Set `model` to the checkpoint id used at startup. The examples use `inclusionAI/Ming-3.0-tts-tiny`.
 
 ## Zero-shot speech
 
-Leave out `ref_audio` to synthesize with a zero speaker embedding. `seed` fixes the flow-matching noise. `response_format` accepts `wav`, `mp3`, `flac`, and `pcm`. The default is `wav`.
+Leave out `ref_audio`. `seed` fixes the flow-matching noise. `response_format` accepts `wav`, `mp3`, `flac`, and `pcm`. The default is `wav`.
 
 1. Use curl
 
@@ -65,7 +73,7 @@ curl -X POST http://127.0.0.1:8000/v1/audio/speech \
   --output speech-zh.wav
 ```
 
-`temperature` overrides the checkpoint default of 1.5. `max_new_tokens` limits the latent steps and is clamped to the checkpoint maximum of 250. Speech can stop earlier, when the stop head exceeds 0.5, and not before 13 steps.
+`temperature` overrides the checkpoint default. `max_new_tokens` limits the latent steps and is clamped to that checkpoint's maximum. Speech can stop earlier, when the stop head exceeds 0.5.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/audio/speech \
@@ -83,7 +91,7 @@ curl -X POST http://127.0.0.1:8000/v1/audio/speech \
 
 ## Voice cloning
 
-`ref_audio` is one recording. A bare path is read by the server from its working directory, so start the server at the repository root when the path is `tests/data/query_to_cars.wav`. A `data:` URL is also accepted. `ref_text` is accepted and does not change the speaker embedding. A second reference is rejected.
+`ref_audio` is one recording. A bare path is read by the server from its working directory, so start the server at the repository root when the path is `tests/data/query_to_cars.wav`. A `data:` URL is also accepted. A second reference is rejected.
 
 1. Use curl
 

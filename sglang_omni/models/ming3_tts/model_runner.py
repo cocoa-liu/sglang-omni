@@ -37,6 +37,9 @@ class Ming3TTSRequestData(SGLangARRequestData):
     latent_history: torch.Tensor
     feedback_embeddings: list[torch.Tensor] = field(default_factory=list)
     latents: list[torch.Tensor] = field(default_factory=list)
+    zero_speaker: bool = False
+    prompt_latents: torch.Tensor | None = None
+    latent_position: int = -1
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -80,11 +83,26 @@ class Ming3TTSModelRunner(ModelRunner):
         ):
             request_state: Ming3TTSRequestData = request.data
             prompt_embeddings = token_embedding(request_state.input_ids.to(self.device))
-            prompt_embeddings[request_state.speaker_position] = self.model.spk_head(
-                request_state.speaker_embedding.to(
-                    self.device, dtype=prompt_embeddings.dtype
+            if request_state.speaker_position < 0:
+                pass
+            elif request_state.zero_speaker:
+                prompt_embeddings[request_state.speaker_position] = 0
+            else:
+                prompt_embeddings[request_state.speaker_position] = self.model.spk_head(
+                    request_state.speaker_embedding.to(
+                        self.device, dtype=prompt_embeddings.dtype
+                    )
                 )
-            )
+            if request_state.prompt_latents is not None:
+                projected = self.model.linear_proj_audio(
+                    request_state.prompt_latents.to(
+                        self.device, dtype=prompt_embeddings.dtype
+                    ).reshape(-1, 1, request_state.prompt_latents.shape[-1])
+                ).reshape(-1, prompt_embeddings.shape[-1])
+                start = request_state.latent_position
+                prompt_embeddings[start : start + projected.shape[0]] = projected
+            else:
+                pass
             # note (chenyang): retraction re-prefills generated tokens, whose
             # inputs are the feedback embeddings rather than token embeddings.
             sequence_embeddings = torch.cat(

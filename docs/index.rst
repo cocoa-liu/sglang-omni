@@ -49,6 +49,9 @@ Supported Models
    * - `inclusionAI/Ming-3.0-tts-tiny <https://huggingface.co/inclusionAI/Ming-3.0-tts-tiny>`_
      - TTS
      - 44.1 kHz voice cloning from one reference recording
+   * - `inclusionAI/Ming-3.0-tts-0.5B <https://huggingface.co/inclusionAI/Ming-3.0-tts-0.5B>`_
+     - TTS
+     - Dense 0.5B backbone, 44.1 kHz voice cloning from one reference recording
    * - `dots-studio/dots.tts-mf <https://huggingface.co/dots-studio/dots.tts-mf>`_
      - TTS
      - 48 kHz continuous-latent TTS; also ``dots.tts-soar`` / ``dots.tts-base``
@@ -104,6 +107,7 @@ Supported Models
    :caption: Get Started
 
    get_started/installation.md
+   get_started/installation_apple_silicon.md
    get_started/installation_npu.md
    get_started/installation_xpu.md
    get_started/installation_cpu.md
@@ -164,11 +168,19 @@ Supported Models
 
 .. toctree::
    :maxdepth: 1
+   :caption: MLX
+
+   mlx/index.md
+
+
+.. toctree::
+   :maxdepth: 1
    :caption: Developer Reference
 
    developer_reference/main.md
    developer_reference/apiserver_design.md
    developer_reference/pipeline.md
+   developer_reference/full_duplex_interactive_model.md
    developer_reference/config.md
    developer_reference/adding_parameters.md
    developer_reference/communication.md
@@ -181,6 +193,5 @@ Supported Models
    developer_reference/asr_bench.md
    developer_reference/omni_offline_bench.md
    developer_reference/rl_admin_control.md
-   developer_reference/mlx.md
    developer_reference/ci_labels.md
    developer_reference/bump_version.md
