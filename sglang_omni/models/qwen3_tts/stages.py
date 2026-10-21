@@ -440,12 +440,7 @@ def create_vocoder_executor(
     # note (ratish): Factory construction completes before the stage process
     # publishes readiness, so CUDA capture cannot overlap request-time GPU work
     # from colocated stages.
-    if (
-        torch.device(device).type == "npu"
-        and async_decode is not False
-        and incremental_codec_cuda_graph
-        and not enable_deterministic_inference
-    ):
+    if torch.device(device).type == "npu":
         # note (cocoa): Internal-format convolutions use aclop, which cannot be captured.
         previous_internal_format = torch_npu._C._npu_getOption(
             "ALLOW_INTERNAL_FORMAT"

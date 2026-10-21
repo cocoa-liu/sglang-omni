@@ -683,8 +683,6 @@ TTFA measures arrival of the first PCM payload, not the first audible speech; it
 
 ## Known Limitations
 
-- **NPU process sharing.** Asynchronous incremental codec graphs disable internal
-  tensor formats for all stages sharing the vocoder process.
 - **Reference audio recommended.** As a cloning model, Qwen3-TTS Base produces robotic speech
   without a reference clip.
 - **Transcript improves cloning.** Providing `text` in `references` (ICL mode) yields better
