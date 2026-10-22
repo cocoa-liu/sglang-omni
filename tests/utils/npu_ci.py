@@ -16,6 +16,7 @@ import torch
 from benchmarks.benchmarker.utils import managed_omni_server
 from benchmarks.dataset.prepare import SEEDTTS_DATASET_ID
 from benchmarks.dataset.seedtts import SampleInput, load_seedtts_samples
+from sglang_omni.models.qwen3_tts.config import Qwen3TTSPipelineConfig
 from sglang_omni.utils.connection import find_available_port
 
 
@@ -46,8 +47,6 @@ class NpuServer:
 def managed_npu_server(
     model_type: Literal["ASR", "TTS"],
     output_dir: Path,
-    *,
-    max_running_requests: int | None = None,
 ) -> Iterator[NpuServer]:
     device_module = torch.get_device_module("npu")
     assert device_module.is_available() and device_module.device_count() >= 1
@@ -57,8 +56,10 @@ def managed_npu_server(
     assert server_config.is_file()
     if model_type == "TTS":
         assert (model_path / "speech_tokenizer").is_dir()
+        # note (cocoa): Full-load CI needs both admission limits, not the small example queue.
+        admission_limits = Qwen3TTSPipelineConfig.generation_admission_defaults()
     else:
-        pass
+        admission_limits = {}
     port = find_available_port()
     with managed_omni_server(
         model_path=str(model_path),
@@ -66,8 +67,8 @@ def managed_npu_server(
         port=port,
         host="127.0.0.1",
         log_file=output_dir / f"{model_type.lower()}-server.log",
-        max_running_requests=max_running_requests,
         wait_for_gpu_release=False,
+        **admission_limits,
     ):
         with requests.Session() as session:
             session.trust_env = False

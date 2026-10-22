@@ -49,6 +49,7 @@ from tests.utils import (
     MetricCheckCollector,
     assert_open_loop_latency_results,
     assert_wer_partitioned,
+    npu_ci,
 )
 
 SEEDTTS_SAMPLE = SampleInput(
@@ -57,6 +58,54 @@ SEEDTTS_SAMPLE = SampleInput(
     ref_audio="ref.wav",
     target_text="hello world",
 )
+
+
+@pytest.mark.parametrize("model_type", ["TTS", "ASR"])
+def test_npu_server_preserves_full_load_admission_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    model_type: Literal["TTS", "ASR"],
+) -> None:
+    """NPU TTS bursts must not inherit the small example queue that caused 503s."""
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    (model_path / "config.json").write_text("{}")
+    (model_path / "speech_tokenizer").mkdir()
+    serving_config = tmp_path / "serving.yaml"
+    serving_config.touch()
+    monkeypatch.setenv(f"OMNI_NPU_{model_type}_MODEL", str(model_path))
+    monkeypatch.setenv(f"OMNI_NPU_{model_type}_CONFIG", str(serving_config))
+    device_module = MagicMock()
+    device_module.is_available.return_value = True
+    device_module.device_count.return_value = 1
+    monkeypatch.setattr(torch, "get_device_module", lambda _: device_module)
+    admission_limits = {"max_running_requests": 16, "max_queued_requests": 32}
+    monkeypatch.setattr(
+        npu_ci.Qwen3TTSPipelineConfig,
+        "generation_admission_defaults",
+        MagicMock(return_value=admission_limits),
+    )
+    server = MagicMock()
+    monkeypatch.setattr(npu_ci, "managed_omni_server", server)
+    session = MagicMock()
+    session.get.return_value.json.return_value = {"data": [{"id": str(model_path)}]}
+    session_factory = MagicMock()
+    session_factory.return_value.__enter__.return_value = session
+    monkeypatch.setattr(requests, "Session", session_factory)
+
+    with npu_ci.managed_npu_server(model_type, tmp_path) as handle:
+        assert handle.model_path == str(model_path)
+        session.get.assert_called_once_with(f"{handle.base_url}/v1/models", timeout=10)
+    expected_limits = admission_limits if model_type == "TTS" else {}
+    assert server.call_args.kwargs == {
+        "model_path": str(model_path),
+        "server_config": str(serving_config),
+        "port": handle.port,
+        "host": "127.0.0.1",
+        "log_file": tmp_path / f"{model_type.lower()}-server.log",
+        "wait_for_gpu_release": False,
+        **expected_limits,
+    }
 
 
 @pytest.mark.parametrize(

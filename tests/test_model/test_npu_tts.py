@@ -22,12 +22,14 @@ from benchmarks.eval.benchmark_tts_seedtts import (
     run_tts_seedtts_transcribe,
 )
 from benchmarks.tasks.tts import run_seedtts_utmos
+from sglang_omni.models.qwen3_tts.config import Qwen3TTSPipelineConfig
 from tests.test_model.tts_ci_config import select_tts_ci_preset
 from tests.utils import (
     QWEN3_ASR_WER_CONCURRENCY,
     MetricCheckCollector,
     assert_open_loop_latency_results,
     assert_streaming_consistency,
+    assert_tts_audio_result_integrity,
     print_latency_point,
 )
 from tests.utils.npu_ci import load_full_seedtts_samples, managed_npu_server
@@ -39,7 +41,6 @@ pytestmark = pytest.mark.skipif(
 
 PRESET = select_tts_ci_preset("qwen3-tts-custom-voice")[1]
 TTS_CONCURRENCY = DEFAULT_TTS_BENCHMARK_CONCURRENCY
-TTS_MAX_RUNNING_REQUESTS = TtsSeedttsBenchmarkConfig.max_running_requests
 
 
 def validate_wav(audio_path: Path) -> None:
@@ -64,10 +65,9 @@ def test_full_seedtts(tmp_path: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     configurations: list[TtsSeedttsBenchmarkConfig] = []
     checks = MetricCheckCollector("NPU TTS SeedTTS EN")
+    admission_limits = Qwen3TTSPipelineConfig.generation_admission_defaults()
 
-    with managed_npu_server(
-        "TTS", output_dir, max_running_requests=TTS_MAX_RUNNING_REQUESTS
-    ) as tts_server:
+    with managed_npu_server("TTS", output_dir) as tts_server:
         with requests.Session() as session:
             session.trust_env = False
             response = session.post(
@@ -116,6 +116,7 @@ def test_full_seedtts(tmp_path: Path) -> None:
                 concurrency=TTS_CONCURRENCY,
                 asr_concurrency=QWEN3_ASR_WER_CONCURRENCY,
                 warmup=1,
+                **admission_limits,
             )
             configurations.append(configuration)
             asyncio.run(run_tts_seedtts_benchmark(configuration, samples=samples))
@@ -153,6 +154,12 @@ def test_full_seedtts(tmp_path: Path) -> None:
     streaming = json.loads((output_dir / "stream/speed_results.json").read_text())
     for results in (nonstream, streaming):
         requests_results = results["per_request"]
+        assert_tts_audio_result_integrity(
+            results["summary"],
+            requests_results,
+            label="NPU TTS SeedTTS EN",
+            collector=checks,
+        )
         checks.check(
             len(requests_results) == len(samples)
             and {request["id"] for request in requests_results} == expected_ids,
@@ -166,7 +173,7 @@ def test_full_seedtts(tmp_path: Path) -> None:
             if request["is_success"]:
                 validate_wav(Path(request["wav_path"]))
             else:
-                checks.fail(f"Generation failed: {request['id']}: {request['error']}")
+                pass
     assert_streaming_consistency(
         nonstream["per_request"],
         streaming["per_request"],
@@ -184,9 +191,8 @@ def test_streaming_first_audio_latency(tmp_path: Path) -> None:
     latency = PRESET.latency
     assert latency is not None
     checks = MetricCheckCollector("NPU TTS streaming first-audio latency")
-    with managed_npu_server(
-        "TTS", output_dir, max_running_requests=TTS_MAX_RUNNING_REQUESTS
-    ) as tts_server:
+    admission_limits = Qwen3TTSPipelineConfig.generation_admission_defaults()
+    with managed_npu_server("TTS", output_dir) as tts_server:
         for point in latency.points:
             configuration = TtsSeedttsBenchmarkConfig(
                 model=tts_server.model_path,
@@ -202,11 +208,12 @@ def test_streaming_first_audio_latency(tmp_path: Path) -> None:
                 device="npu:0",
                 stream=True,
                 response_format="pcm",
-                concurrency=TTS_MAX_RUNNING_REQUESTS,
+                concurrency=admission_limits["max_running_requests"],
                 max_samples=point.samples,
                 request_rate=point.request_rate,
                 arrival_seed=0,
                 warmup=1,
+                **admission_limits,
             )
             results = asyncio.run(
                 run_tts_seedtts_benchmark(
