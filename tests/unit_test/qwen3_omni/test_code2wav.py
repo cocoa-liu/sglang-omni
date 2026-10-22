@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
+from sglang.kernels.ops.attention.flash_attention_v3 import _is_fa3_supported
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
     Qwen3OmniMoeCode2WavConfig,
 )
@@ -1151,9 +1152,22 @@ def decode_in_parts(
 
 @pytest.mark.accelerator
 @SLOT_DECODES
+@pytest.mark.parametrize(
+    "is_paged_attention",
+    [
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available() or not _is_fa3_supported(),
+                reason="FlashAttention 3 runs on SM 8.x and 9.x with CUDA 12.3 or newer",
+            ),
+        ),
+        False,
+    ],
+)
 @pytest.mark.parametrize("parts", [(4, 6, 7), (1,) * 17, (10, 7)])
 def test_slot_decodes_error_to_fp32_is_the_fused_forward_error(
-    monkeypatch: pytest.MonkeyPatch, parts: tuple[int, ...]
+    monkeypatch: pytest.MonkeyPatch, parts: tuple[int, ...], is_paged_attention: bool
 ) -> None:
     monkeypatch.setattr(torch.backends.cudnn, "allow_tf32", False)
     whole_error = 0.0
@@ -1171,9 +1185,9 @@ def test_slot_decodes_error_to_fp32_is_the_fused_forward_error(
             )
             snake_beta.fuse_vocoder_decoder(model.decoder)
             whole = model(codes)
-            incremental = decode_in_parts(
-                Qwen3OmniIncrementalCodec(model), codes, parts
-            )
+            incremental_codec = Qwen3OmniIncrementalCodec(model)
+            incremental_codec.is_paged_attention = is_paged_attention
+            incremental = decode_in_parts(incremental_codec, codes, parts)
         whole_error += float((whole.float() - reference).norm() / reference.norm())
         incremental_error += float(
             (incremental.float() - reference).norm() / reference.norm()
