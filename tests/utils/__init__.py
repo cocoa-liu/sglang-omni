@@ -39,6 +39,66 @@ QWEN3_ASR_WER_CONCURRENCY = 4
 QWEN3_ASR_ROUTER_STARTUP_TIMEOUT = 600
 
 
+def assert_open_loop_latency_results(
+    results: Mapping[str, object],
+    *,
+    samples: int,
+    label: str,
+    collector: MetricCheckCollector,
+) -> None:
+    summary = results["summary"]
+    per_request = results["per_request"]
+    assert isinstance(summary, dict) and isinstance(per_request, list)
+    assert all(isinstance(request, dict) for request in per_request)
+    collector.check(
+        len(per_request) == samples and summary.get("completed_requests") == samples,
+        f"{label}: {summary.get('completed_requests')}/{len(per_request)} completed, "
+        f"expected {samples}/{samples}",
+    )
+    failed = [request["id"] for request in per_request if not request.get("is_success")]
+    collector.check(not failed, f"{label}: failed requests {failed[:5]}")
+    silent = [
+        request["id"]
+        for request in per_request
+        if request.get("is_success")
+        and not (
+            request.get("audio_chunk_count")
+            and request.get("first_audio_payload_bytes")
+        )
+    ]
+    collector.check(not silent, f"{label}: requests without audio {silent[:5]}")
+    collector.check(
+        summary.get("client_slot_waits") == 0,
+        f"{label}: {summary.get('client_slot_waits')} requests waited for a client "
+        "slot, so the run was not open loop",
+    )
+
+
+def print_latency_point(summary: Mapping[str, object], *, label: str) -> None:
+    keys = (
+        "audio_ttfp_from_arrival_median_s",
+        "audio_ttfp_from_arrival_p95_s",
+        "audio_ttfp_from_arrival_p99_s",
+        "audio_ttfp_median_s",
+        "audio_ttfp_p95_s",
+        "dispatch_lateness_p50_s",
+        "dispatch_lateness_p99_s",
+        "dispatch_lateness_max_s",
+        "first_audio_payload_bytes_mean",
+        "audio_chunks_mean",
+        "max_playback_underrun_p95_s",
+        "c50",
+        "c100",
+        "c200",
+        "playback_continuity_requests",
+        "playback_continuity_na_requests",
+        "client_slot_waits",
+    )
+    print(f"\n[TTS latency] {label}")
+    for key in keys:
+        print(f"  {key:<36} {summary.get(key)}")
+
+
 @dataclass
 class ServerHandle:
     """Typed bundle of a running server's process, port, and log file."""

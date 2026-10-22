@@ -18,7 +18,7 @@ permissions:
   pull-requests: read
 
 env:
-  NPU_CI_IMAGE: &npu_ci_image swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni:main-cann9.0.0-910b
+  NPU_CI_IMAGE: swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni:main-cann9.0.0-910b
 
 jobs:
   check-changes:
@@ -43,6 +43,7 @@ jobs:
               - 'examples/configs/**'
               - 'pyproject_npu.toml'
               - 'scripts/npu/**'
+              - '.dockerignore'
               - 'docker/npu.Dockerfile'
               - '.github/scripts/resolve_ci_labels.py'
               - '.github/scripts/pr_ci_gate.py'
@@ -53,10 +54,11 @@ jobs:
     needs: check-changes
     if: needs.check-changes.outputs.npu == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     outputs:
       exact_sha: ${{ steps.meta.outputs.exact_sha }}
       run_npu: ${{ github.event_name != 'pull_request' && 'true' || steps.plan.outputs.run_npu }}
+      image: ${{ steps.image.outputs.image }}
     steps:
       - name: Fetch latest PR gate state
         if: github.event_name == 'pull_request'
@@ -124,6 +126,44 @@ jobs:
         if: github.event_name != 'pull_request'
         run: echo 'Manual and scheduled runs bypass the PR lint/mergeability gate.'
 
+      - uses: docker/setup-buildx-action@v3
+        if: github.event_name != 'pull_request' || steps.plan.outputs.run_npu == 'true'
+
+      - name: Resolve and validate NPU image
+        if: github.event_name != 'pull_request' || steps.plan.outputs.run_npu == 'true'
+        id: image
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          manifest=$(docker buildx imagetools inspect "$NPU_CI_IMAGE" --format '{{json .Manifest}}')
+          digest=$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<< "$manifest")
+          image="${NPU_CI_IMAGE%%@*}@$digest"
+          image_config=$(docker buildx imagetools inspect "$image" --format '{{json .Image}}')
+          if ! jq -e '
+            .os == "linux" and .architecture == "arm64" and
+            ((.config.Labels["org.opencontainers.image.version"] // "") | endswith("-910b"))
+          ' <<< "$image_config" > /dev/null; then
+            echo '::error::NPU_CI_IMAGE must be an ARM64/910B image produced by Release Docker Images (NPU).'
+            exit 1
+          fi
+          image_revision=$(jq -r '.config.Labels["org.opencontainers.image.revision"] // ""' <<< "$image_config")
+          if [[ ! "$image_revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::NPU_CI_IMAGE must record its source commit in org.opencontainers.image.revision.'
+            exit 1
+          fi
+          git fetch --no-tags --depth=1 origin "$image_revision"
+          image_inputs=(.dockerignore docker/npu.Dockerfile pyproject_npu.toml scripts/npu)
+          if ! git diff --quiet "$image_revision" HEAD -- "${image_inputs[@]}"; then
+            git diff --name-only "$image_revision" HEAD -- "${image_inputs[@]}"
+            echo '::error::NPU image inputs differ from this checkout. Build and publish a matching 910B test image with Release Docker Images (NPU), then update NPU_CI_IMAGE in this workflow. The model jobs do not upgrade the NPU runtime.'
+            exit 1
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          {
+            echo "NPU test image: $image"
+            echo "Image source commit: $image_revision"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   models:
     name: ${{ matrix.model }} (NPU)
     needs: [check-changes, preflight]
@@ -134,11 +174,11 @@ jobs:
     environment: npu-ci
     runs-on: linux-aarch64-a2-2
     container:
-      image: *npu_ci_image
+      image: ${{ needs.preflight.outputs.image }}
     defaults:
       run:
         shell: bash
-    timeout-minutes: 60
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -147,14 +187,18 @@ jobs:
           - model: qwen3-tts
             suite: tests/test_model/test_npu_tts.py
             config: examples/configs/qwen3_tts_0_6b_customvoice_npu.yaml
+            timeout_minutes: 240
           - model: qwen3-asr
             suite: tests/test_model/test_npu_asr.py
             config: examples/configs/qwen3_asr_npu.yaml
+            timeout_minutes: 60
     # The runner pool shares devices; different PRs must not use them together.
     concurrency:
       group: omni-npu-model-linux-aarch64-a2-2
+      queue: max
       cancel-in-progress: false
     env:
+      NPU_CI_IMAGE: ${{ needs.preflight.outputs.image }}
       OMNI_RUN_NPU_TESTS: '1'
       OMP_NUM_THREADS: '8'
       HF_HUB_OFFLINE: '1'
@@ -184,10 +228,29 @@ jobs:
 
       - name: Refresh Omni editable install from PR source
         run: |
+          source "${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit}/set_env.sh"
           cp pyproject_npu.toml pyproject.toml
           python -m pip install --no-deps --no-build-isolation -e .
-          python -m pip install pytest==8.3.2 jiwer==4.0.0 rapidfuzz==3.14.1
+          python -m pip install pytest==8.3.2 jiwer==4.0.0 rapidfuzz==3.14.1 zhon==2.0.2 more-itertools==10.8.0
+          # Use Whisper's text normalizer without pulling its CUDA Triton dependency.
+          python -m pip install --no-deps openai-whisper==20250625
+          python -c 'from benchmarks.tasks.asr import normalize_text; normalize_text("hello", "en"); normalize_text("你好", "zh")'
           python -m pip freeze > npu-ci-results/packages.txt
+
+      - name: Prepare full SeedTTS dataset
+        timeout-minutes: 20
+        env:
+          HF_HUB_OFFLINE: '0'
+        run: python -m benchmarks.dataset.prepare --dataset seedtts
+
+      - name: Prepare TTS quality evaluator
+        if: matrix.model == 'qwen3-tts'
+        timeout-minutes: 20
+        env:
+          HF_HUB_OFFLINE: '0'
+        run: |
+          source "${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit}/set_env.sh"
+          python -m benchmarks.metrics.utmos --warm-cache
 
       - name: Run model tests
         env:
@@ -204,7 +267,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: npu-${{ matrix.model }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: npu-ci-results/
+          path: |
+            npu-ci-results/
+            !npu-ci-results/tts/**/audio/**
           if-no-files-found: warn
           retention-days: 7
 

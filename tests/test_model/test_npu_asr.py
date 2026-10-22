@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Qwen3-ASR NPU serving regressions using cached official audio samples."""
+"""Qwen3-ASR NPU SeedTTS accuracy and serving regressions."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -11,11 +12,19 @@ import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Literal
+from urllib.parse import urlsplit
 
 import pytest
 import requests
 
+from benchmarks.eval.benchmark_asr_seedtts import run_asr_seedtts_once
+from benchmarks.tasks.asr import DEFAULT_ASR_TRANSCRIBE_CONCURRENCY
+from tests.test_model.asr_ci_config import select_asr_ci_preset
+from tests.utils.npu_ci import load_full_seedtts_samples
+
 AUDIO_DOWNLOAD_TIMEOUT_SECONDS = 60
+ASR_CONCURRENCY = DEFAULT_ASR_TRANSCRIBE_CONCURRENCY
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("OMNI_RUN_NPU_TESTS") != "1",
@@ -205,3 +214,51 @@ def test_transcription_after_rejection(asr_server):
         )
         assert response.status_code in {400, 422}, response.text
     request_transcription(asr_server, "English", "after-rejection")
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_full_seedtts(
+    asr_server: tuple[str, str, dict[str, dict[str, str | float]], Path],
+    language: Literal["en", "zh"],
+) -> None:
+    base_url, model_id, _, output = asr_server
+    samples = load_full_seedtts_samples(language)
+    port = urlsplit(base_url).port
+    assert port is not None
+    results = asyncio.run(
+        run_asr_seedtts_once(
+            samples,
+            host="127.0.0.1",
+            port=port,
+            model_path=model_id,
+            lang=language,
+            concurrency=ASR_CONCURRENCY,
+            warmup=ASR_CONCURRENCY * 2,
+        )
+    )
+    (output / f"asr_seedtts_{language}_results.json").write_text(
+        json.dumps(results, ensure_ascii=False, indent=2)
+    )
+    summary = results["summary"]
+    assert summary["total_samples"] == summary["evaluated"] == len(samples), summary
+    assert all(sample["hyp_norm"].strip() for sample in results["per_sample"])
+    thresholds = select_asr_ci_preset("qwen3")[1].thresholds
+    corpus_wer_max = (
+        thresholds.en_corpus_wer_max
+        if language == "en"
+        else thresholds.zh_corpus_wer_max
+    )
+    assert summary["corpus_wer"] <= corpus_wer_max, summary
+    sample_wer_max = (
+        thresholds.en_sample_wer_max
+        if language == "en"
+        else thresholds.zh_sample_wer_max
+    )
+    high_wer_samples = [
+        sample
+        for sample in results["per_sample"]
+        if not sample["is_success"]
+        or sample["wer"] is None
+        or sample["wer"] > sample_wer_max
+    ]
+    assert not high_wer_samples, high_wer_samples

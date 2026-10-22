@@ -1,177 +1,221 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Qwen3-TTS CustomVoice NPU serving regressions."""
+"""Full SeedTTS generation and transcription coverage for NPU CustomVoice."""
 
 from __future__ import annotations
 
 import array
-import io
+import asyncio
 import json
 import os
-import time
 import wave
-from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import requests
 
+from benchmarks.dataset.prepare import SEEDTTS_DATASET_ID
+from benchmarks.eval.benchmark_tts_seedtts import (
+    DEFAULT_TTS_BENCHMARK_CONCURRENCY,
+    TtsSeedttsBenchmarkConfig,
+    run_tts_seedtts_benchmark,
+    run_tts_seedtts_transcribe,
+)
+from benchmarks.tasks.tts import run_seedtts_utmos
+from tests.test_model.tts_ci_config import select_tts_ci_preset
+from tests.utils import (
+    QWEN3_ASR_WER_CONCURRENCY,
+    MetricCheckCollector,
+    assert_open_loop_latency_results,
+    assert_streaming_consistency,
+    print_latency_point,
+)
+from tests.utils.npu_ci import load_full_seedtts_samples, managed_npu_server
+
 pytestmark = pytest.mark.skipif(
     os.environ.get("OMNI_RUN_NPU_TESTS") != "1",
-    reason="Set OMNI_RUN_NPU_TESTS=1 with a reserved NPU and local model",
+    reason="Set OMNI_RUN_NPU_TESTS=1 with a reserved NPU and local models",
 )
 
+PRESET = select_tts_ci_preset("qwen3-tts-custom-voice")[1]
+TTS_CONCURRENCY = DEFAULT_TTS_BENCHMARK_CONCURRENCY
+TTS_MAX_RUNNING_REQUESTS = TtsSeedttsBenchmarkConfig.max_running_requests
 
-def validate_pcm(pcm: bytes, sample_rate: int = 24000) -> float:
-    assert pcm and len(pcm) % 2 == 0, "Empty or truncated PCM16 output"
+
+def validate_wav(audio_path: Path) -> None:
+    with wave.open(str(audio_path), "rb") as waveform:
+        assert (
+            waveform.getnchannels(),
+            waveform.getsampwidth(),
+            waveform.getframerate(),
+        ) == (1, 2, 24000)
+        frames = waveform.getnframes()
+        pcm = waveform.readframes(frames)
+    assert frames > 0 and len(pcm) == frames * 2, f"Truncated WAV: {audio_path}"
     samples = array.array("h")
     samples.frombytes(pcm)
-    assert any(samples), "All-silent output"
-    duration = len(samples) / sample_rate
-    assert 0.2 <= duration <= 30, f"Unexpected short-prompt duration: {duration}"
-    return duration
+    assert any(samples), f"All-silent output: {audio_path}"
 
 
-def validate_wav(data: bytes) -> float:
-    with wave.open(io.BytesIO(data), "rb") as wav:
-        assert (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) == (
-            1,
-            2,
-            24000,
-        )
-        frames = wav.getnframes()
-        pcm = wav.readframes(frames)
-        assert len(pcm) == frames * 2, "Truncated WAV payload"
-    return validate_pcm(pcm)
+def test_full_seedtts(tmp_path: Path) -> None:
+    samples = load_full_seedtts_samples("en")
+    expected_ids = {sample.sample_id for sample in samples}
+    output_dir = Path(os.environ.get("OMNI_NPU_TTS_OUTPUT", str(tmp_path))) / "en"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    configurations: list[TtsSeedttsBenchmarkConfig] = []
+    checks = MetricCheckCollector("NPU TTS SeedTTS EN")
 
-
-@pytest.fixture(scope="module")
-def tts_server(tmp_path_factory):
-    import torch
-    import torch_npu  # noqa: F401
-
-    from benchmarks.benchmarker.utils import managed_omni_server
-    from sglang_omni.platforms import current_platform
-    from tests.test_model.omni_router_utils import find_available_port_range
-
-    assert current_platform.is_npu() and torch.npu.is_available()
-    assert torch.npu.device_count() >= 1, "At least one allocated NPU is required"
-    model = Path(os.environ["OMNI_NPU_TTS_MODEL"]).resolve()
-    config = Path(os.environ["OMNI_NPU_TTS_CONFIG"]).resolve()
-    assert (model / "config.json").is_file(), "A complete local model is required"
-    assert (model / "speech_tokenizer").is_dir(), "Include speech_tokenizer weights"
-    assert config.is_file(), "Supply the model's NPU serving config"
-    configured_port = os.environ.get("OMNI_NPU_TTS_PORT")
-    port = int(configured_port) if configured_port else find_available_port_range(1)
-    output = Path(
-        os.environ.get("OMNI_NPU_TTS_OUTPUT", str(tmp_path_factory.mktemp("npu-tts")))
-    )
-    output.mkdir(parents=True, exist_ok=True)
-    base_url = f"http://127.0.0.1:{port}"
-    with managed_omni_server(
-        model_path=str(model),
-        server_config=str(config),
-        port=port,
-        host="127.0.0.1",
-        log_file=output / "server.log",
-        # The shared default cleanup is CUDA-specific. The context manager still
-        # stops this server's process group; the CI container owns NPU cleanup.
-        wait_for_gpu_release=False,
-    ):
+    with managed_npu_server(
+        "TTS", output_dir, max_running_requests=TTS_MAX_RUNNING_REQUESTS
+    ) as tts_server:
         with requests.Session() as session:
             session.trust_env = False
-            response = session.get(base_url + "/v1/models", timeout=10)
-            response.raise_for_status()
-            assert response.json()["data"]
-        yield base_url, output
+            response = session.post(
+                f"{tts_server.base_url}/v1/audio/speech", json={}, timeout=10
+            )
+            checks.check(response.status_code in {400, 422}, response.text)
+            with session.post(
+                f"{tts_server.base_url}/v1/audio/speech",
+                json={
+                    "model": tts_server.model_path,
+                    "input": samples[0].target_text,
+                    "task_type": "CustomVoice",
+                    "voice": PRESET.model.voice,
+                    "stream": True,
+                    "response_format": "pcm",
+                },
+                stream=True,
+                timeout=(10, 600),
+            ) as response:
+                assert response.status_code == 200, response.text
+                for header, expected in (
+                    ("x-sample-rate", "24000"),
+                    ("x-channels", "1"),
+                    ("x-bit-depth", "16"),
+                ):
+                    checks.check(response.headers.get(header) == expected, header)
+                pcm = response.content
+                checks.check(bool(pcm) and len(pcm) % 2 == 0, "Incomplete PCM16 stream")
+        for stream in (False, True):
+            mode = "stream" if stream else "nonstream"
+            configuration = TtsSeedttsBenchmarkConfig(
+                model=tts_server.model_path,
+                meta=SEEDTTS_DATASET_ID,
+                base_url=tts_server.base_url,
+                voice=PRESET.model.voice,
+                task_type="CustomVoice",
+                voice_clone=PRESET.model.voice_clone,
+                ref_format=PRESET.model.ref_format,
+                token_count=PRESET.model.token_count,
+                lang="en",
+                device="npu:0",
+                output_dir=str(output_dir / mode),
+                server_config=os.environ["OMNI_NPU_TTS_CONFIG"],
+                stream=stream,
+                response_format="pcm" if stream else "wav",
+                concurrency=TTS_CONCURRENCY,
+                asr_concurrency=QWEN3_ASR_WER_CONCURRENCY,
+                warmup=1,
+            )
+            configurations.append(configuration)
+            asyncio.run(run_tts_seedtts_benchmark(configuration, samples=samples))
 
-
-def speech_payload(language: str = "English") -> dict[str, str | int]:
-    return {
-        "input": (
-            "Hello, this is a speech synthesis test on Ascend."
-            if language == "English"
-            else "你好，欢迎使用语音合成服务。"
-        ),
-        "language": language,
-        "task_type": "CustomVoice",
-        "voice": "Ryan" if language == "English" else "Vivian",
-        "seed": 123456,
-        "max_new_tokens": 256,
-        "response_format": "wav",
-    }
-
-
-def request_speech(base_url, payload, output, name, stream=False):
-    payload = dict(payload, stream=stream, response_format="pcm" if stream else "wav")
-    start = time.monotonic()
-    first_byte = None
-    chunks = []
-    # Separate sessions also keep concurrent requests independent.
-    with requests.Session() as session:
-        session.trust_env = False
-        with session.post(
-            base_url + "/v1/audio/speech", json=payload, stream=True, timeout=(10, 600)
-        ) as response:
-            assert response.status_code == 200, response.text[:2000]
-            if stream:
-                assert response.headers.get("x-sample-rate") == "24000"
-                assert response.headers.get("x-channels") == "1"
-                assert response.headers.get("x-bit-depth") == "16"
-            for chunk in response.iter_content(chunk_size=4096):
-                if chunk:
-                    if first_byte is None:
-                        first_byte = time.monotonic() - start
-                    chunks.append(chunk)
-    audio = b"".join(chunks)
-    (output / f"{name}.{'pcm' if stream else 'wav'}").write_bytes(audio)
-    duration = validate_pcm(audio) if stream else validate_wav(audio)
-    (output / f"{name}.json").write_text(
-        json.dumps(
-            {
-                "request": payload,
-                "duration_s": duration,
-                "elapsed_s": time.monotonic() - start,
-                "first_byte_s": first_byte,
-                "received_chunks": len(chunks),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+    # UTMOS is a TorchScript evaluator; score on CPU without an NPU JIT port.
+    utmos = run_seedtts_utmos(replace(configurations[0], device="cpu"))
+    checks.check(
+        utmos["summary"]["total_samples"]
+        == utmos["summary"]["evaluated"]
+        == len(samples),
+        f"Incomplete UTMOS scoring: {utmos['summary']}",
     )
 
-
-@pytest.mark.parametrize("language", ["English", "Chinese"])
-def test_nonstream_speech(tts_server, language):
-    base_url, output = tts_server
-    request_speech(base_url, speech_payload(language), output, language.lower())
-
-
-def test_stream_speech(tts_server):
-    base_url, output = tts_server
-    request_speech(base_url, speech_payload(), output, "stream", stream=True)
-
-
-def test_concurrent_requests(tts_server):
-    base_url, output = tts_server
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [
-            pool.submit(
-                request_speech,
-                base_url,
-                speech_payload(),
-                output,
-                f"concurrent-{i}",
+    with managed_npu_server("ASR", output_dir) as asr_server:
+        for configuration in configurations:
+            configuration.asr_model_path = asr_server.model_path
+            results = run_tts_seedtts_transcribe(
+                configuration, asr_router_port=asr_server.port
             )
-            for i in range(2)
-        ]
-        for future in futures:
-            future.result()
+            summary = results["wer_summary"]
+            checks.check(
+                summary["total_samples"] == summary["evaluated"] == len(samples),
+                f"Incomplete generation/transcription in {configuration.output_dir}: {summary}",
+            )
+            checks.check(
+                all(sample.hyp_norm.strip() for sample in results["per_sample"]),
+                f"Empty transcript in {configuration.output_dir}",
+            )
+            checks.check(
+                {sample.sample_id for sample in results["per_sample"]} == expected_ids,
+                f"Transcription sample IDs differ in {configuration.output_dir}",
+            )
+
+    nonstream = json.loads((output_dir / "nonstream/speed_results.json").read_text())
+    streaming = json.loads((output_dir / "stream/speed_results.json").read_text())
+    for results in (nonstream, streaming):
+        requests_results = results["per_request"]
+        checks.check(
+            len(requests_results) == len(samples)
+            and {request["id"] for request in requests_results} == expected_ids,
+            "Generation did not cover the full SeedTTS split",
+        )
+        for request in requests_results:
+            checks.check(
+                request["finish_reason"] != "length",
+                f"Truncated generation: {request['id']}",
+            )
+            if request["is_success"]:
+                validate_wav(Path(request["wav_path"]))
+            else:
+                checks.fail(f"Generation failed: {request['id']}: {request['error']}")
+    assert_streaming_consistency(
+        nonstream["per_request"],
+        streaming["per_request"],
+        expected_stream_count=len(samples),
+        max_failed_requests=0,
+        collector=checks,
+    )
+    checks.assert_all()
 
 
-def test_valid_request_after_rejection(tts_server):
-    base_url, output = tts_server
-    with requests.Session() as session:
-        session.trust_env = False
-        response = session.post(base_url + "/v1/audio/speech", json={}, timeout=10)
-        assert response.status_code in {400, 422}, response.text
-    request_speech(base_url, speech_payload(), output, "after-rejection")
+def test_streaming_first_audio_latency(tmp_path: Path) -> None:
+    samples = load_full_seedtts_samples("en")
+    output_dir = Path(os.environ.get("OMNI_NPU_TTS_OUTPUT", str(tmp_path))) / "latency"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    latency = PRESET.latency
+    assert latency is not None
+    checks = MetricCheckCollector("NPU TTS streaming first-audio latency")
+    with managed_npu_server(
+        "TTS", output_dir, max_running_requests=TTS_MAX_RUNNING_REQUESTS
+    ) as tts_server:
+        for point in latency.points:
+            configuration = TtsSeedttsBenchmarkConfig(
+                model=tts_server.model_path,
+                meta=SEEDTTS_DATASET_ID,
+                base_url=tts_server.base_url,
+                output_dir=str(output_dir / f"r{point.request_rate:g}"),
+                server_config=os.environ["OMNI_NPU_TTS_CONFIG"],
+                voice=PRESET.model.voice,
+                task_type="CustomVoice",
+                voice_clone=PRESET.model.voice_clone,
+                ref_format=PRESET.model.ref_format,
+                token_count=PRESET.model.token_count,
+                device="npu:0",
+                stream=True,
+                response_format="pcm",
+                concurrency=TTS_MAX_RUNNING_REQUESTS,
+                max_samples=point.samples,
+                request_rate=point.request_rate,
+                arrival_seed=0,
+                warmup=1,
+            )
+            results = asyncio.run(
+                run_tts_seedtts_benchmark(
+                    configuration, samples=samples[: point.samples]
+                )
+            )
+            label = f"NPU TTS latency {point.request_rate:g} rps"
+            print_latency_point(results["summary"], label=label)
+            assert_open_loop_latency_results(
+                results, samples=point.samples, label=label, collector=checks
+            )
+    checks.assert_all()

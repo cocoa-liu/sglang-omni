@@ -7,14 +7,17 @@ import json
 import socket
 import sys
 import threading
+import wave
 from collections.abc import AsyncIterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Literal
 from unittest.mock import MagicMock
 
 import pytest
 import requests
+import torch
+import torchaudio
 from aiohttp import web
 
 from benchmarks.benchmarker.data import FinishReason
@@ -32,6 +35,7 @@ from benchmarks.eval.benchmark_tts_seedtts import (
     run_tts_concurrency_sweep,
     run_tts_sustained_overshoot,
 )
+from benchmarks.metrics import utmos
 from benchmarks.metrics.wer import SampleOutput, calculate_wer_metrics
 from benchmarks.tasks import asr
 from benchmarks.tasks.tts import (
@@ -40,7 +44,12 @@ from benchmarks.tasks.tts import (
     stream_outcome_collector,
 )
 from sglang_omni.admission import QueueFullError
-from tests.utils import QWEN3_ASR_WER_CONCURRENCY, assert_wer_partitioned
+from tests.utils import (
+    QWEN3_ASR_WER_CONCURRENCY,
+    MetricCheckCollector,
+    assert_open_loop_latency_results,
+    assert_wer_partitioned,
+)
 
 SEEDTTS_SAMPLE = SampleInput(
     sample_id="sample-1",
@@ -48,6 +57,100 @@ SEEDTTS_SAMPLE = SampleInput(
     ref_audio="ref.wav",
     target_text="hello world",
 )
+
+
+@pytest.mark.parametrize(
+    ("channels", "sample_rate"), [(1, 16000), (2, 16000), (1, 24000)]
+)
+def test_utmos_reads_pcm_without_torchcodec(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    channels: int,
+    sample_rate: int,
+) -> None:
+    """PCM scoring must not require TorchCodec on the NPU evaluation host."""
+    pcm = torch.tensor([[8192, -16384]], dtype=torch.int16)[:, :channels].repeat(120, 1)
+    audio_path = tmp_path / "generated.wav"
+    with wave.open(str(audio_path), "wb") as waveform:
+        waveform.setnchannels(channels)
+        waveform.setsampwidth(2)
+        waveform.setframerate(sample_rate)
+        waveform.writeframes(pcm.numpy().tobytes())
+    predictor = MagicMock(return_value=torch.tensor([4.0]))
+    monkeypatch.setattr(utmos, "ensure_utmos_assets", MagicMock(return_value=tmp_path))
+    monkeypatch.setattr(torch.jit, "load", MagicMock(return_value=predictor))
+    monkeypatch.setattr(
+        torchaudio, "load", MagicMock(side_effect=ImportError("TorchCodec unavailable"))
+    )
+    assert utmos.UTMOSScorer("cpu").score_batch([str(audio_path)]) == [4.0]
+    expected = (pcm.float().T / 32768).mean(dim=0, keepdim=True)
+    if sample_rate != utmos.SAMPLE_RATE:
+        expected = torchaudio.functional.resample(
+            expected, sample_rate, utmos.SAMPLE_RATE
+        )
+    else:
+        pass
+    expected = (expected * 32767).clamp(-32768, 32767).to(torch.int16)
+    torch.testing.assert_close(predictor.call_args.args[0], expected, rtol=0, atol=0)
+
+
+def test_utmos_cpu_remaps_traced_cuda_devices(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """map_location alone leaves traced CUDA transfers that break CPU scoring."""
+
+    class CudaOnlyPredictor(torch.nn.Module):
+        def forward(self, waveform: torch.Tensor) -> torch.Tensor:
+            return waveform.to("cuda:0").float().mean(dim=1)
+
+    model_path = tmp_path / "utmos.jit"
+    torch.jit.script(CudaOnlyPredictor()).save(str(model_path))
+    monkeypatch.setattr(
+        utmos, "ensure_utmos_assets", MagicMock(return_value=model_path)
+    )
+    audio_path = tmp_path / "generated.wav"
+    with wave.open(str(audio_path), "wb") as waveform:
+        waveform.setnchannels(1)
+        waveform.setsampwidth(2)
+        waveform.setframerate(16000)
+        waveform.writeframes(b"\x00\x20" * 120)
+    assert utmos.UTMOSScorer("cpu").score_batch([str(audio_path)]) == [8191.0]
+
+
+@pytest.mark.parametrize(
+    "failure", [None, "incomplete", "failed", "silent", "throttled"]
+)
+def test_open_loop_latency_requires_complete_unthrottled_audio(
+    failure: Literal["incomplete", "failed", "silent", "throttled"] | None,
+) -> None:
+    results = {
+        "summary": {"completed_requests": 1, "client_slot_waits": 0},
+        "per_request": [
+            {
+                "id": "sample-1",
+                "is_success": True,
+                "audio_chunk_count": 2,
+                "first_audio_payload_bytes": 480,
+            }
+        ],
+    }
+    if failure == "incomplete":
+        results["per_request"] = []
+    elif failure == "failed":
+        results["per_request"][0]["is_success"] = False
+    elif failure == "silent":
+        results["per_request"][0]["first_audio_payload_bytes"] = 0
+    elif failure == "throttled":
+        results["summary"]["client_slot_waits"] = 1
+    else:
+        pass
+    checks = MetricCheckCollector()
+    assert_open_loop_latency_results(results, samples=1, label="test", collector=checks)
+    if failure is None:
+        checks.assert_all()
+    else:
+        with pytest.raises(AssertionError):
+            checks.assert_all()
 
 
 @pytest.mark.parametrize(
